@@ -27,6 +27,9 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "rest_framework_simplejwt",
+    "drf_spectacular",
+    "common",
+    "accounts",
 ]
 
 MIDDLEWARE = [
@@ -74,6 +77,8 @@ DATABASES = {
     }
 }
 
+AUTH_USER_MODEL = "accounts.User"
+
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -94,6 +99,23 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "EXCEPTION_HANDLER": "common.exception_handler.custom_exception_handler",
+}
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "어디가남 API",
+    "DESCRIPTION": (
+        "전남 날씨 기반 여행 추천 서비스 백엔드 API 문서입니다. "
+        "모든 애플리케이션 응답은 success/data/error 공통 포맷을 사용합니다."
+    ),
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "COMPONENT_SPLIT_REQUEST": True,
+    "SWAGGER_UI_SETTINGS": {
+        "deepLinking": True,
+        "persistAuthorization": True,
+    },
 }
 
 SIMPLE_JWT = {

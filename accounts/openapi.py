@@ -24,6 +24,26 @@ class CheckIdSuccessResponseSerializer(serializers.Serializer):
     error = serializers.JSONField(allow_null=True)
 
 
+class SendEmailVerificationCodeDataSerializer(serializers.Serializer):
+    message = serializers.CharField(help_text="인증번호 발송 결과 메시지")
+
+
+class SendEmailVerificationCodeSuccessResponseSerializer(serializers.Serializer):
+    success = serializers.BooleanField()
+    data = SendEmailVerificationCodeDataSerializer()
+    error = serializers.JSONField(allow_null=True)
+
+
+class VerifyEmailVerificationCodeDataSerializer(serializers.Serializer):
+    message = serializers.CharField(help_text="인증번호 확인 결과 메시지")
+
+
+class VerifyEmailVerificationCodeSuccessResponseSerializer(serializers.Serializer):
+    success = serializers.BooleanField()
+    data = VerifyEmailVerificationCodeDataSerializer()
+    error = serializers.JSONField(allow_null=True)
+
+
 class ApiErrorDetailSerializer(serializers.Serializer):
     code = serializers.CharField(help_text="클라이언트가 분기 처리할 에러 코드")
     message = serializers.CharField(help_text="사용자에게 표시할 수 있는 에러 메시지")

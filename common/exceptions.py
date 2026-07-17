@@ -16,6 +16,12 @@ class ErrorCode(Enum):
         "이미 사용 중인 이메일입니다.",
     )
     CODE_MISMATCH = ("CODE_MISMATCH", 400, "인증번호가 일치하지 않습니다.")
+    CODE_EXPIRED = ("CODE_EXPIRED", 400, "인증번호가 만료되었습니다.")
+    CODE_ALREADY_USED = (
+        "CODE_ALREADY_USED",
+        400,
+        "이미 사용된 인증번호입니다.",
+    )
     PASSWORD_MISMATCH = ("PASSWORD_MISMATCH", 400, "비밀번호가 일치하지 않습니다.")
     TERMS_NOT_AGREED = (
         "TERMS_NOT_AGREED",

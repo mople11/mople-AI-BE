@@ -11,6 +11,7 @@ env = environ.Env(
     MYSQL_PORT=(int, 3306),
     JWT_ACCESS_TOKEN_LIFETIME_MIN=(int, 60),
     JWT_REFRESH_TOKEN_LIFETIME_DAYS=(int, 14),
+    EMAIL_VERIFICATION_CODE_LIFETIME_MIN=(int, 5),
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
@@ -127,7 +128,10 @@ SIMPLE_JWT = {
     ),
 }
 
-DEV_EMAIL_VERIFICATION_CODE = env(
-    "DEV_EMAIL_VERIFICATION_CODE",
-    default="123456",
+EMAIL_VERIFICATION_CODE_LIFETIME_MIN = env(
+    "EMAIL_VERIFICATION_CODE_LIFETIME_MIN"
+)
+EMAIL_BACKEND = env(
+    "EMAIL_BACKEND",
+    default="django.core.mail.backends.console.EmailBackend",
 )

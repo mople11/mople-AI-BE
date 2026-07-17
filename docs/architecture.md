@@ -92,8 +92,11 @@ MYSQL_HOST=127.0.0.1
 MYSQL_PORT=3306
 JWT_ACCESS_TOKEN_LIFETIME_MIN=60
 JWT_REFRESH_TOKEN_LIFETIME_DAYS=14
-DEV_EMAIL_VERIFICATION_CODE=123456
+EMAIL_VERIFICATION_CODE_LIFETIME_MIN=5
+EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
 ```
+
+(`DEV_EMAIL_VERIFICATION_CODE`는 이슈 #5에서 실제 `EmailVerificationCode` 조회 방식으로 대체되며 제거된다.)
 
 ### 4.3 로컬 MySQL (`docker-compose.yml`)
 
@@ -130,6 +133,8 @@ DRF는 기본적으로 이 포맷을 강제하지 않으므로, `common/exceptio
 ### 5.2 에러 코드
 
 기존 `app/exceptions/codes.py`의 `ErrorCode` enum을 `common/exceptions.py`로 이식하고, 회원가입 단계에서는 `DUPLICATE_ID`, `DUPLICATE_EMAIL`, `CODE_MISMATCH`, `PASSWORD_MISMATCH`, `TERMS_NOT_AGREED`를 사용한다. 새 코드가 필요하면 이 enum에 추가하는 방식으로 확장한다.
+
+이슈 #5(이메일 인증코드) 반영 시 `CODE_EXPIRED`를 추가한다. `CODE_MISMATCH`는 코드 값 자체가 틀린 경우, `CODE_EXPIRED`는 코드 값은 맞지만 `expires_at`이 지난 경우로 구분한다.
 
 ### 5.3 URL 버전 규약
 
@@ -184,6 +189,15 @@ DRF는 기본적으로 이 포맷을 강제하지 않으므로, `common/exceptio
 - `pw`는 `AUTH_PASSWORD_VALIDATORS`를 모두 통과해야 한다.
 - `nickname`은 필수이며 공백일 수 없고 최대 50자이다.
 - 일반 필드 검증 실패는 `COMMON_422`와 필드별 `error.details`를 반환한다.
+
+### 6.3 이메일 인증코드 발송/확인 (이슈 #5)
+
+`SignupSerializer.validate_verifyCode`가 `settings.DEV_EMAIL_VERIFICATION_CODE`(고정값)와 단순 비교하던 임시 구현을 실제 `EmailVerificationCode` 조회 방식으로 교체한다.
+
+- **유효시간**: `EMAIL_VERIFICATION_CODE_LIFETIME_MIN` 환경변수(기본값 5분)만큼 발급 시점부터 유효. `EmailVerificationCode.expires_at`은 발급 시각 + 이 값으로 저장한다. 코드에 값을 하드코딩하지 않는다.
+- **에러 코드 구분**: 코드 값이 틀리면 `CODE_MISMATCH`, 코드 값은 맞지만 `expires_at`이 지났으면 `CODE_EXPIRED`를 반환한다.
+- **이메일 발송 백엔드**: `EMAIL_BACKEND` 환경변수로 설정. 로컬 개발은 `django.core.mail.backends.console.EmailBackend`(콘솔 출력), 테스트는 Django 테스트 러너가 자동으로 적용하는 `locmem.EmailBackend`를 사용하므로 테스트 설정에서 별도 오버라이드가 필요 없다. 실제 SMTP 연동은 배포 단계에서 환경변수 값만 교체해 적용한다.
+- `SignupSerializer.validate_verifyCode`는 `email`+`code`로 미사용(`is_used=False`)·미만료 레코드를 조회해 검증하고, 성공 시 해당 레코드를 `is_used=True`로 갱신한다.
 
 ## 7. 향후 앱 설계 (Notion 기능명세서 반영)
 

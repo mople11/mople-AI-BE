@@ -1,11 +1,14 @@
-import pytest
-from django.conf import settings
+from datetime import timedelta
 
-from accounts.models import User
+import pytest
+from django.utils import timezone
+
+from accounts.models import EmailVerificationCode, User
 
 
 SIGNUP_URL = "/api/v1/auth/signup"
 CHECK_ID_URL = "/api/v1/auth/signup/check-id"
+SIGNUP_CODE = "123456"
 
 
 def signup_payload(**overrides):
@@ -15,7 +18,7 @@ def signup_payload(**overrides):
         "pwCheck": "safe-password-123",
         "nickname": "여행자",
         "email": "traveler@example.com",
-        "verifyCode": settings.DEV_EMAIL_VERIFICATION_CODE,
+        "verifyCode": SIGNUP_CODE,
         "agreeTerms": True,
     }
     payload.update(overrides)
@@ -24,6 +27,13 @@ def signup_payload(**overrides):
 
 @pytest.mark.django_db
 def test_signup_success(api_client):
+    verification = EmailVerificationCode.objects.create(
+        email="traveler@example.com",
+        code=SIGNUP_CODE,
+        purpose=EmailVerificationCode.Purpose.SIGNUP,
+        expires_at=timezone.now() + timedelta(minutes=5),
+    )
+
     response = api_client.post(SIGNUP_URL, signup_payload(), format="json")
 
     assert response.status_code == 201
@@ -37,6 +47,8 @@ def test_signup_success(api_client):
     assert user.nickname == "여행자"
     assert user.agreed_terms_at is not None
     assert user.check_password("safe-password-123")
+    verification.refresh_from_db()
+    assert verification.is_used is True
 
 
 @pytest.mark.django_db
@@ -179,6 +191,62 @@ def test_signup_code_mismatch(api_client):
     assert response.status_code == 400
     assert response.data["success"] is False
     assert response.data["error"]["code"] == "CODE_MISMATCH"
+
+
+@pytest.mark.django_db
+def test_signup_rejects_expired_code(api_client):
+    verification = EmailVerificationCode.objects.create(
+        email="traveler@example.com",
+        code=SIGNUP_CODE,
+        purpose=EmailVerificationCode.Purpose.SIGNUP,
+        expires_at=timezone.now() - timedelta(seconds=1),
+    )
+
+    response = api_client.post(SIGNUP_URL, signup_payload(), format="json")
+
+    assert response.status_code == 400
+    assert response.data["error"]["code"] == "CODE_EXPIRED"
+    assert User.objects.exists() is False
+    verification.refresh_from_db()
+    assert verification.is_used is False
+
+
+@pytest.mark.django_db
+def test_signup_rejects_already_used_code(api_client):
+    EmailVerificationCode.objects.create(
+        email="traveler@example.com",
+        code=SIGNUP_CODE,
+        purpose=EmailVerificationCode.Purpose.SIGNUP,
+        expires_at=timezone.now() + timedelta(minutes=5),
+        is_used=True,
+    )
+
+    response = api_client.post(SIGNUP_URL, signup_payload(), format="json")
+
+    assert response.status_code == 400
+    assert response.data["error"]["code"] == "CODE_ALREADY_USED"
+    assert User.objects.exists() is False
+
+
+@pytest.mark.django_db
+def test_signup_validation_failure_does_not_consume_code(api_client):
+    verification = EmailVerificationCode.objects.create(
+        email="traveler@example.com",
+        code=SIGNUP_CODE,
+        purpose=EmailVerificationCode.Purpose.SIGNUP,
+        expires_at=timezone.now() + timedelta(minutes=5),
+    )
+
+    response = api_client.post(
+        SIGNUP_URL,
+        signup_payload(pwCheck="different-password"),
+        format="json",
+    )
+
+    assert response.status_code == 400
+    assert response.data["error"]["code"] == "PASSWORD_MISMATCH"
+    verification.refresh_from_db()
+    assert verification.is_used is False
 
 
 @pytest.mark.django_db

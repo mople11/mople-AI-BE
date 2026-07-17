@@ -26,6 +26,30 @@ def test_openapi_schema_documents_auth_endpoints(api_client):
     assert check_id["parameters"][0]["description"]
     assert {"200", "422", "500"} <= set(check_id["responses"])
 
+    send_email_code = schema["paths"][
+        "/api/v1/auth/email/verify-code"
+    ]["post"]
+    assert send_email_code["summary"] == "이메일 인증번호 발송"
+    assert send_email_code["description"]
+    assert send_email_code["tags"] == ["Auth"]
+    assert "examples" in send_email_code["requestBody"]["content"][
+        "application/json"
+    ]
+    assert {"200", "422", "500"} <= set(send_email_code["responses"])
+
+    verify_email_code = schema["paths"][
+        "/api/v1/auth/email/verify-confirm"
+    ]["post"]
+    assert verify_email_code["summary"] == "이메일 인증번호 확인"
+    assert verify_email_code["description"]
+    assert verify_email_code["tags"] == ["Auth"]
+    assert "examples" in verify_email_code["requestBody"]["content"][
+        "application/json"
+    ]
+    assert {"200", "400", "422", "500"} <= set(
+        verify_email_code["responses"]
+    )
+
 
 def test_swagger_ui_is_available(api_client):
     response = api_client.get(reverse("swagger-ui"))

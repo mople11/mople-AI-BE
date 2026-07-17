@@ -1,13 +1,41 @@
-from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.validators import UnicodeUsernameValidator
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import RegexValidator
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import serializers
 
-from accounts.models import User
+from accounts.models import EmailVerificationCode, User
+from accounts.services import verify_email_verification_code
 from common.exceptions import ApiError, ErrorCode
+
+
+class SendEmailVerificationCodeSerializer(serializers.Serializer):
+    email = serializers.EmailField(help_text="인증번호를 받을 이메일 주소")
+    purpose = serializers.ChoiceField(
+        choices=EmailVerificationCode.Purpose.choices,
+        help_text="인증 목적(signup 또는 password_reset)",
+    )
+
+
+class VerifyEmailVerificationCodeSerializer(serializers.Serializer):
+    email = serializers.EmailField(help_text="인증번호를 발급받은 이메일 주소")
+    code = serializers.CharField(
+        min_length=6,
+        max_length=6,
+        validators=[
+            RegexValidator(
+                regex=r"^[0-9]{6}$",
+                message="인증번호는 6자리 숫자여야 합니다.",
+            )
+        ],
+        help_text="이메일로 전달받은 6자리 인증번호",
+    )
+    purpose = serializers.ChoiceField(
+        choices=EmailVerificationCode.Purpose.choices,
+        help_text="인증 목적(signup 또는 password_reset)",
+    )
 
 
 class SignupSerializer(serializers.Serializer):
@@ -31,7 +59,7 @@ class SignupSerializer(serializers.Serializer):
     email = serializers.EmailField(help_text="중복되지 않는 유효한 이메일 주소")
     verifyCode = serializers.CharField(
         write_only=True,
-        help_text="개발 환경 이메일 인증코드",
+        help_text="이메일로 전달받은 회원가입 인증번호",
     )
     agreeTerms = serializers.BooleanField(
         help_text="이용약관 동의 여부. 회원가입하려면 true여야 합니다.",
@@ -45,11 +73,6 @@ class SignupSerializer(serializers.Serializer):
     def validate_email(self, value: str) -> str:
         if User.objects.filter(email=value).exists():
             raise ApiError(ErrorCode.DUPLICATE_EMAIL)
-        return value
-
-    def validate_verifyCode(self, value: str) -> str:
-        if value != settings.DEV_EMAIL_VERIFICATION_CODE:
-            raise ApiError(ErrorCode.CODE_MISMATCH)
         return value
 
     def validate_agreeTerms(self, value: bool) -> bool:
@@ -71,12 +94,18 @@ class SignupSerializer(serializers.Serializer):
         except DjangoValidationError as exc:
             raise serializers.ValidationError({"pw": exc.messages}) from exc
 
+        verify_email_verification_code(
+            email=attrs["email"],
+            code=attrs["verifyCode"],
+            purpose=EmailVerificationCode.Purpose.SIGNUP,
+        )
+
         return attrs
 
     def create(self, validated_data):
         password = validated_data.pop("pw")
         validated_data.pop("pwCheck")
-        validated_data.pop("verifyCode")
+        verification_code = validated_data.pop("verifyCode")
         validated_data.pop("agreeTerms")
 
         user = User(
@@ -88,7 +117,15 @@ class SignupSerializer(serializers.Serializer):
         user.set_password(password)
         try:
             with transaction.atomic():
+                verification = verify_email_verification_code(
+                    email=user.email,
+                    code=verification_code,
+                    purpose=EmailVerificationCode.Purpose.SIGNUP,
+                    for_update=True,
+                )
                 user.save()
+                verification.is_used = True
+                verification.save(update_fields=["is_used"])
         except IntegrityError:
             if User.objects.filter(username=user.username).exists():
                 raise ApiError(ErrorCode.DUPLICATE_ID)

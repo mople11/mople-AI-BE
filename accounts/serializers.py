@@ -11,6 +11,22 @@ from accounts.services import verify_email_verification_code
 from common.exceptions import ApiError, ErrorCode
 
 
+class LoginSerializer(serializers.Serializer):
+    id = serializers.CharField(
+        max_length=150,
+        help_text="로그인 아이디(최대 150자)",
+    )
+    pw = serializers.CharField(
+        write_only=True,
+        trim_whitespace=False,
+        help_text="로그인 비밀번호",
+    )
+
+
+class LogoutSerializer(serializers.Serializer):
+    refreshToken = serializers.CharField(help_text="로그인 시 발급받은 refresh token")
+
+
 class SendEmailVerificationCodeSerializer(serializers.Serializer):
     email = serializers.EmailField(help_text="인증번호를 받을 이메일 주소")
     purpose = serializers.ChoiceField(

@@ -9,6 +9,12 @@ class ErrorCode(Enum):
     COMMON_422 = ("COMMON_422", 422, "요청 값이 올바르지 않습니다.")
     COMMON_500 = ("COMMON_500", 500, "서버 내부 오류가 발생했습니다.")
     AUTH_401 = ("AUTH_401", 401, "인증이 필요합니다.")
+    INVALID_CREDENTIALS = (
+        "INVALID_CREDENTIALS",
+        401,
+        "아이디 또는 비밀번호가 일치하지 않습니다.",
+    )
+    INVALID_TOKEN = ("INVALID_TOKEN", 400, "유효하지 않은 토큰입니다.")
     DUPLICATE_ID = ("DUPLICATE_ID", 409, "이미 사용 중인 아이디입니다.")
     DUPLICATE_EMAIL = (
         "DUPLICATE_EMAIL",

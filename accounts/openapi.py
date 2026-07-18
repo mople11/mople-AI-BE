@@ -1,6 +1,31 @@
 from rest_framework import serializers
 
 
+class AuthUserSerializer(serializers.Serializer):
+    id = serializers.CharField(help_text="로그인 아이디")
+    nickname = serializers.CharField(help_text="사용자 닉네임")
+
+
+class AuthTokenDataSerializer(serializers.Serializer):
+    accessToken = serializers.CharField(help_text="API 인증에 사용할 JWT 액세스 토큰")
+    refreshToken = serializers.CharField(
+        help_text="액세스 토큰 재발급용 JWT 리프레시 토큰"
+    )
+    user = AuthUserSerializer()
+
+
+class AuthTokenSuccessResponseSerializer(serializers.Serializer):
+    success = serializers.BooleanField()
+    data = AuthTokenDataSerializer()
+    error = serializers.JSONField(allow_null=True)
+
+
+class LogoutSuccessResponseSerializer(serializers.Serializer):
+    success = serializers.BooleanField()
+    data = serializers.JSONField(allow_null=True)
+    error = serializers.JSONField(allow_null=True)
+
+
 class SignupDataSerializer(serializers.Serializer):
     userId = serializers.CharField(help_text="가입한 사용자의 로그인 아이디")
     accessToken = serializers.CharField(help_text="API 인증에 사용할 JWT 액세스 토큰")

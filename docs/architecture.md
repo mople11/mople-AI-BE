@@ -74,7 +74,7 @@ Eodiganam/
 
 ### 4.1 `config/settings.py` 핵심 항목
 
-- `INSTALLED_APPS`: `django.contrib.admin`, `auth`, `contenttypes`, `sessions`, `staticfiles` (기본) + `rest_framework`, `rest_framework_simplejwt` + 도메인 앱들
+- `INSTALLED_APPS`: `django.contrib.admin`, `auth`, `contenttypes`, `sessions`, `staticfiles` (기본) + `rest_framework`, `rest_framework_simplejwt`, `rest_framework_simplejwt.token_blacklist`(로그아웃 시 refresh token 무효화용, `feature/auth-login`에서 추가 — 6.4절 참고) + 도메인 앱들
 - `AUTH_USER_MODEL = "accounts.User"` — 커스텀 User 모델 사용 선언 (반드시 최초 마이그레이션 전에 설정)
 - `REST_FRAMEWORK`: 기본 인증 클래스를 `rest_framework_simplejwt.authentication.JWTAuthentication`으로, 기본 예외 핸들러를 `common.exception_handler.custom_exception_handler`로 지정
 - `DATABASES["default"]`: `django.db.backends.mysql`, PyMySQL 사용을 위해 `config/__init__.py`에서 `pymysql.install_as_MySQLdb()` 호출
@@ -136,6 +136,8 @@ DRF는 기본적으로 이 포맷을 강제하지 않으므로, `common/exceptio
 
 이슈 #5(이메일 인증코드) 반영 시 `CODE_EXPIRED`를 추가한다. `CODE_MISMATCH`는 코드 값 자체가 틀린 경우, `CODE_EXPIRED`는 코드 값은 맞지만 `expires_at`이 지난 경우로 구분한다.
 
+`feature/auth-login`(로그인/로그아웃) 반영 시 `INVALID_CREDENTIALS`(401)와 `INVALID_TOKEN`(400)을 추가한다. 자세한 발생 조건은 6.4절 표를 따른다.
+
 ### 5.3 URL 버전 규약
 
 기존과 동일하게 `api/v1/` 프리픽스를 유지한다. 예: `api/v1/auth/signup`.
@@ -172,9 +174,9 @@ DRF는 기본적으로 이 포맷을 강제하지 않으므로, `common/exceptio
 |---|---|---|
 | `POST /api/v1/auth/signup` | `signup` | 회원가입 |
 | `GET /api/v1/auth/signup/check-id` | `check_id_duplicate` | 아이디 중복 확인 |
-| `POST /api/v1/auth/login` | `login` | 아이디/비밀번호 로그인 → JWT 발급 |
+| `POST /api/v1/auth/login` | `login` | 아이디/비밀번호 로그인 → JWT 발급 (6.4절) |
 | `POST /api/v1/auth/login/social` | `social_login` | 소셜 로그인 (google/kakao) |
-| `POST /api/v1/auth/logout` | `logout` | 로그아웃 (simplejwt는 기본적으로 stateless이므로 refresh token blacklist 앱 사용 검토) |
+| `POST /api/v1/auth/logout` | `logout` | 로그아웃 — refresh token을 `token_blacklist`에 등록해 무효화 (6.4절) |
 | `POST /api/v1/auth/email/verify-code` | `send_email_code` | 이메일 인증코드 발송 |
 | `POST /api/v1/auth/email/verify-confirm` | `verify_email_code` | 이메일 인증코드 확인 |
 | `POST /api/v1/auth/password/reset-request` | `send_password_reset_code` | 비밀번호 재설정 코드 발송 |
@@ -198,6 +200,120 @@ DRF는 기본적으로 이 포맷을 강제하지 않으므로, `common/exceptio
 - **에러 코드 구분**: 코드 값이 틀리면 `CODE_MISMATCH`, 코드 값은 맞지만 `expires_at`이 지났으면 `CODE_EXPIRED`를 반환한다.
 - **이메일 발송 백엔드**: `EMAIL_BACKEND` 환경변수로 설정. 로컬 개발은 `django.core.mail.backends.console.EmailBackend`(콘솔 출력), 테스트는 Django 테스트 러너가 자동으로 적용하는 `locmem.EmailBackend`를 사용하므로 테스트 설정에서 별도 오버라이드가 필요 없다. 실제 SMTP 연동은 배포 단계에서 환경변수 값만 교체해 적용한다.
 - `SignupSerializer.validate_verifyCode`는 `email`+`code`로 미사용(`is_used=False`)·미만료 레코드를 조회해 검증하고, 성공 시 해당 레코드를 `is_used=True`로 갱신한다.
+
+### 6.4 로그인/로그아웃 설계 (`feature/auth-login`)
+
+`feature/auth-signup`([[project_branch_scope_auth_signup]] 참고)에서 제외했던 로그인/로그아웃을 이 브랜치에서 구현한다. 대상은 `POST /api/v1/auth/login`, `POST /api/v1/auth/logout` 두 엔드포인트로 한정하고, 소셜 로그인·비밀번호 재설정은 포함하지 않는다.
+
+#### 6.4.1 로그아웃 방식 결정: refresh token 블랙리스트
+
+simplejwt는 기본적으로 stateless라 발급된 토큰을 서버가 강제로 무효화할 수단이 없다. 두 선택지를 검토했다.
+
+- **(A) 아무것도 안 함** — "로그아웃"은 클라이언트가 로컬에 저장된 토큰을 지우는 동작뿐이고, 서버 입장에서 access/refresh token은 자연 만료 전까지 계속 유효하다.
+- **(B) `rest_framework_simplejwt.token_blacklist` 앱을 설치**하고, 로그아웃 시 전달받은 refresh token을 블랙리스트에 등록한다. 이후 이 refresh token으로는 새 access token을 재발급받을 수 없다.
+
+**(B)를 채택한다.** 근거:
+
+1. 로그인 응답 계약(`AuthTokenResponse`)에 `refreshToken`이 포함돼 있다는 것 자체가 클라이언트가 이 토큰을 들고 있다는 전제다. 로그아웃이 이 토큰에 아무 영향도 못 주면 사용자에게는 "로그아웃했다"는 착각만 남긴다.
+2. `token_blacklist`는 이미 의존성에 있는 `djangorestframework-simplejwt` 패키지에 포함된 앱을 `INSTALLED_APPS`에 추가하는 것으로 끝난다 — 커스텀 세션/토큰 관리 로직을 새로 만들 필요가 없다 (0절 원칙 3: Django/DRF 기본 기능 활용).
+3. 비용은 `OutstandingToken`/`BlacklistedToken` 테이블 2개와 마이그레이션 1회뿐이다.
+
+**한계**: access token 자체는 여전히 stateless이므로 로그아웃 직후에도 만료 전까지는 유효하다(`JWT_ACCESS_TOKEN_LIFETIME_MIN`만큼). 이 한계는 access token 수명을 짧게 유지하는 선에서 감수하고, access token 자체를 무효화하는 별도 장치(예: 매 요청마다 블랙리스트 조회)는 이번 스테이지에서 도입하지 않는다.
+
+**설정 및 배포 변경**: `INSTALLED_APPS`에 `rest_framework_simplejwt.token_blacklist`를 추가하고, 애플리케이션 배포 전에 반드시 `python manage.py migrate --noinput`을 실행한다. 이 앱이 활성화되면 `RefreshToken.for_user()`가 `OutstandingToken` 테이블에 발급 토큰을 기록하므로, 마이그레이션을 누락하면 로그아웃뿐 아니라 해당 메서드를 사용하는 회원가입과 로그인도 500 오류로 실패한다. CI도 테스트 전에 마이그레이션을 명시적으로 실행한다. 추가 환경변수는 필요 없다.
+
+**refreshToken을 응답 바디로 내려주는 방식에 대한 검토**: `refreshToken`을 JSON 응답 바디에 평문으로 담아 내려주면, 클라이언트가 이를 저장하는 방식(예: localStorage)에 따라 XSS 공격 시 탈취될 수 있다는 지적이 있었다. 대안으로 `HttpOnly`/`Secure`/`SameSite=Strict` 쿠키로 전달하는 방식을 검토했으나, 다음 이유로 **현재의 JSON 바디 방식을 유지**하기로 확정한다.
+
+- `AuthTokenResponse` 계약은 이미 확정된 API 명세이고, signup 응답도 이미 `accessToken`을 바디로 내려주는 선례가 있어 일관성이 있다.
+- 쿠키 방식은 CORS/CSRF 처리와 쿠키 도메인 설정이 추가로 필요하고 API 계약이 바뀌어 프론트 연동을 다시 맞춰야 한다 — 이번 `feature/auth-login` 범위를 넘어서는 변경이다.
+- 탈취 위험은 로그아웃 시 refresh token을 즉시 블랙리스트에 등록(위 (B) 결정)하고 access token 수명을 짧게 유지하는 것으로 완화한다. 완전한 제거가 아니라 완화라는 점은 인지하고 있으며, 쿠키 전환은 추후 필요 시 별도 브랜치에서 재검토한다.
+
+#### 6.4.2 에러 코드 추가
+
+| 코드 | 상태코드 | 메시지 | 발생 조건 |
+|---|---|---|---|
+| `INVALID_CREDENTIALS` | 401 | 아이디 또는 비밀번호가 일치하지 않습니다. | 로그인 시 `authenticate()`가 `None`을 반환. 아이디가 존재하지 않는 경우/비밀번호가 틀린 경우/계정이 비활성인 경우를 구분하지 않고 동일 코드로 응답한다 (아이디 존재 여부가 유추되지 않도록 의도적으로 뭉뚱그림 — `CODE_MISMATCH`/`CODE_EXPIRED`를 분리했던 이슈 #5 방식과는 반대 방향의 선택이다) |
+| `INVALID_TOKEN` | 400 | 유효하지 않은 토큰입니다. | 로그아웃 요청의 `refreshToken`이 형식 오류·서명 불일치·만료·이미 블랙리스트에 있거나, access token으로 인증한 사용자의 토큰이 아닌 경우 |
+
+기존 `AUTH_401`("인증이 필요합니다")은 그대로 두고 재사용하지 않는다. `AUTH_401`은 "요청 자체에 유효한 인증이 없는 경우"(access token 누락/만료)에 쓰이고, `INVALID_CREDENTIALS`는 "로그인 시도 자체가 틀린 경우"에 쓰여 의미가 다르다.
+
+#### 6.4.3 `POST /api/v1/auth/login`
+
+**요청** (`LoginSerializer`)
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `id` | str | 로그인 아이디 (`User.username`), 최대 150자 |
+| `pw` | str | `write_only` |
+
+**뷰 로직** (`LoginView`, `permission_classes = [AllowAny]`)
+
+1. `LoginSerializer`로 필수 여부와 `id`의 최대 길이(150자)를 검증한다. 사용자 존재 여부나 비밀번호 일치는 여기서 검사하지 않는다.
+2. `django.contrib.auth.authenticate(request, username=id, password=pw)`를 호출한다. 직접 `User.objects.get` + `check_password`를 호출하지 않는 이유: `authenticate()`는 등록된 인증 백엔드(`ModelBackend`)를 통해 비밀번호 검증과 `is_active` 체크를 함께 수행한다. 비활성 계정은 비밀번호가 맞아도 `None`을 반환하므로 별도 분기 없이 자연스럽게 로그인 거부로 이어진다.
+3. `authenticate()`가 `None`이면 `ApiError(ErrorCode.INVALID_CREDENTIALS)`를 발생시킨다.
+4. 성공하면 `RefreshToken.for_user(user)`로 refresh token을 발급하고, `str(refresh)`(refresh token 문자열)와 `str(refresh.access_token)`(access token 문자열)을 함께 응답한다.
+
+**응답 데이터** (`AuthTokenResponse`)
+
+```json
+{
+  "success": true,
+  "data": {
+    "accessToken": "eyJ...",
+    "refreshToken": "eyJ...",
+    "user": { "id": "traveler", "nickname": "여행자" }
+  },
+  "error": null
+}
+```
+
+`user.id`는 signup 응답의 `userId`와 키 이름이 다르다 — 이미 확정된 API 계약이므로 그대로 따르고, 두 응답 간 통일성을 이유로 임의로 바꾸지 않는다. 값은 DB PK가 아니라 `LoginRequest.id`와 동일한 로그인 아이디(`user.username`)이며, 응답 시 정수 PK를 노출하지 않는다.
+
+#### 6.4.4 `POST /api/v1/auth/logout`
+
+**요청** (`LogoutSerializer`, `permission_classes = [IsAuthenticated]`)
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `refreshToken` | str | 로그인 시 발급받은 refresh token |
+
+`IsAuthenticated`는 로그아웃 요청에 유효한 access token(`Authorization: Bearer ...`)이 있는지만 확인하며, 요청 바디의 refresh token 소유권까지 보장하지는 않는다. 따라서 복원한 refresh token의 `user_id` 클레임이 `request.user.pk`와 일치하는지 별도로 확인한다. access token이 없거나 만료된 요청은 `common/exception_handler.py`가 이미 처리하는 경로(`NotAuthenticated`/`AuthenticationFailed` → `AUTH_401`)로 응답한다.
+
+**뷰 로직** (`LogoutView`)
+
+1. `LogoutSerializer`로 `refreshToken` 존재 여부만 검증한다 (누락 시 `COMMON_422`).
+2. `RefreshToken(refreshToken_문자열)`로 토큰 객체를 복원한다 — 이 시점에 서명·만료·블랙리스트 여부가 함께 검증된다.
+3. 복원한 토큰의 `user_id`와 `request.user.pk`가 다르면 토큰 소유 관계를 노출하지 않고 `ApiError(ErrorCode.INVALID_TOKEN)`을 반환한다.
+4. 검증을 통과하면 `token.blacklist()`를 호출한다. simplejwt는 이 한 번의 호출로 `OutstandingToken` 등록과 `BlacklistedToken` 추가를 `get_or_create`로 함께 처리한다.
+5. `TokenError`(서명 불일치·만료·이미 블랙리스트됨)가 발생하면 `ApiError(ErrorCode.INVALID_TOKEN)`으로 변환한다.
+6. 성공 응답은 별도 데이터 없이 `data: null`로 반환한다.
+
+**응답**
+
+```json
+{ "success": true, "data": null, "error": null }
+```
+
+#### 6.4.5 URL 등록 (`accounts/urls.py`)
+
+```
+POST /api/v1/auth/login   -> LoginView   (name="login")
+POST /api/v1/auth/logout  -> LogoutView  (name="logout")
+```
+
+#### 6.4.6 테스트 관점 (`tests/test_auth_login.py`, 신규)
+
+- 로그인 성공: 응답에 `accessToken`/`refreshToken`/`user.id`/`user.nickname`이 모두 존재하는지 확인.
+- 로그인 실패 — 존재하지 않는 아이디: `INVALID_CREDENTIALS`, 401.
+- 로그인 실패 — 비밀번호 불일치: `INVALID_CREDENTIALS`, 401 (아이디 존재 여부와 무관하게 응답이 동일한지 확인).
+- 로그아웃 성공: 로그인으로 받은 `refreshToken`으로 로그아웃 요청 → 같은 문자열로 `RefreshToken(token)`을 다시 생성하면 블랙리스트로 인해 `TokenError`가 발생하는지, 또는 `BlacklistedToken` 레코드가 생성됐는지로 확인.
+- 로그아웃 실패 — access token 없이 요청: `AUTH_401`.
+- 로그아웃 실패 — 다른 사용자의 access token과 refresh token 조합: `INVALID_TOKEN`, 400이며 refresh token은 블랙리스트에 등록되지 않음.
+- 로그아웃 실패 — 형식이 잘못됐거나 만료/이미 블랙리스트된 `refreshToken`: `INVALID_TOKEN`, 400.
+
+#### 6.4.7 미해결 사항 (이번 브랜치 범위 밖)
+
+현재 6.2절 엔드포인트 목록에는 refresh token으로 access token을 재발급받는 `POST /api/v1/auth/token/refresh` 같은 엔드포인트가 없다. 즉 로그인 응답으로 `refreshToken`을 내려주지만, 클라이언트가 이를 실제로 소비할 방법이 아직 명세에 없다. Notion 명세에 해당 엔드포인트가 있는지 확인이 필요하며, 없다면 access token 만료 시 재로그인을 강제하는 것으로 정할지 별도 결정이 필요하다 — 이번 `feature/auth-login` 범위에서는 임의로 추가하지 않는다 (0절 원칙 2).
 
 ## 7. 향후 앱 설계 (Notion 기능명세서 반영)
 

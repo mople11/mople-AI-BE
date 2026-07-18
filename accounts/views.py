@@ -1,3 +1,4 @@
+from django.contrib.auth import authenticate
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
     OpenApiExample,
@@ -5,20 +6,25 @@ from drf_spectacular.utils import (
     OpenApiResponse,
     extend_schema,
 )
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.models import User
 from accounts.openapi import (
+    AuthTokenSuccessResponseSerializer,
     CheckIdSuccessResponseSerializer,
     ErrorResponseSerializer,
+    LogoutSuccessResponseSerializer,
     SendEmailVerificationCodeSuccessResponseSerializer,
     SignupSuccessResponseSerializer,
     VerifyEmailVerificationCodeSuccessResponseSerializer,
 )
 from accounts.serializers import (
     CheckIdSerializer,
+    LoginSerializer,
+    LogoutSerializer,
     SendEmailVerificationCodeSerializer,
     SignupSerializer,
     VerifyEmailVerificationCodeSerializer,
@@ -27,7 +33,127 @@ from accounts.services import (
     send_email_verification_code,
     verify_email_verification_code,
 )
+from common.exceptions import ApiError, ErrorCode
 from common.response import ApiResponse
+
+
+class LoginView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="로그인",
+        description=(
+            "아이디와 비밀번호로 사용자를 인증하고 JWT access token과 "
+            "refresh token을 발급합니다."
+        ),
+        tags=["Auth"],
+        auth=[],
+        request=LoginSerializer,
+        responses={
+            200: OpenApiResponse(
+                response=AuthTokenSuccessResponseSerializer,
+                description="로그인 성공",
+                examples=[
+                    OpenApiExample(
+                        "로그인 성공",
+                        value={
+                            "success": True,
+                            "data": {
+                                "accessToken": "eyJ...",
+                                "refreshToken": "eyJ...",
+                                "user": {"id": "traveler", "nickname": "여행자"},
+                            },
+                            "error": None,
+                        },
+                        response_only=True,
+                    )
+                ],
+            ),
+            401: OpenApiResponse(
+                response=ErrorResponseSerializer,
+                description="아이디 또는 비밀번호 불일치, 비활성 계정",
+            ),
+            422: OpenApiResponse(
+                response=ErrorResponseSerializer,
+                description="필수 필드 누락 또는 형식 검증 실패",
+            ),
+        },
+    )
+    def post(self, request):
+        serializer = LoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = authenticate(
+            request,
+            username=serializer.validated_data["id"],
+            password=serializer.validated_data["pw"],
+        )
+        if user is None:
+            raise ApiError(ErrorCode.INVALID_CREDENTIALS)
+
+        refresh = RefreshToken.for_user(user)
+        return ApiResponse(
+            data={
+                "accessToken": str(refresh.access_token),
+                "refreshToken": str(refresh),
+                "user": {
+                    "id": user.username,
+                    "nickname": user.nickname,
+                },
+            }
+        )
+
+
+class LogoutView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="로그아웃",
+        description=(
+            "유효한 access token으로 인증한 뒤 전달받은 refresh token을 "
+            "블랙리스트에 등록합니다."
+        ),
+        tags=["Auth"],
+        request=LogoutSerializer,
+        responses={
+            200: OpenApiResponse(
+                response=LogoutSuccessResponseSerializer,
+                description="로그아웃 성공",
+                examples=[
+                    OpenApiExample(
+                        "로그아웃 성공",
+                        value={"success": True, "data": None, "error": None},
+                        response_only=True,
+                    )
+                ],
+            ),
+            400: OpenApiResponse(
+                response=ErrorResponseSerializer,
+                description="유효하지 않거나 이미 블랙리스트에 등록된 refresh token",
+            ),
+            401: OpenApiResponse(
+                response=ErrorResponseSerializer,
+                description="access token 누락 또는 인증 실패",
+            ),
+            422: OpenApiResponse(
+                response=ErrorResponseSerializer,
+                description="refreshToken 필드 누락 또는 형식 검증 실패",
+            ),
+        },
+    )
+    def post(self, request):
+        serializer = LogoutSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            refresh = RefreshToken(serializer.validated_data["refreshToken"])
+        except TokenError as exc:
+            raise ApiError(ErrorCode.INVALID_TOKEN) from exc
+
+        if refresh.get("user_id") != str(request.user.pk):
+            raise ApiError(ErrorCode.INVALID_TOKEN)
+
+        refresh.blacklist()
+        return ApiResponse()
 
 
 class SendEmailVerificationCodeView(APIView):

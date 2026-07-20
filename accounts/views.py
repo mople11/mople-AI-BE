@@ -17,6 +17,8 @@ from accounts.openapi import (
     CheckIdSuccessResponseSerializer,
     ErrorResponseSerializer,
     LogoutSuccessResponseSerializer,
+    PasswordResetConfirmSuccessResponseSerializer,
+    PasswordResetRequestSuccessResponseSerializer,
     SendEmailVerificationCodeSuccessResponseSerializer,
     SignupSuccessResponseSerializer,
     VerifyEmailVerificationCodeSuccessResponseSerializer,
@@ -25,12 +27,16 @@ from accounts.serializers import (
     CheckIdSerializer,
     LoginSerializer,
     LogoutSerializer,
+    PasswordResetConfirmSerializer,
+    PasswordResetRequestSerializer,
     SendEmailVerificationCodeSerializer,
     SignupSerializer,
     VerifyEmailVerificationCodeSerializer,
 )
 from accounts.services import (
+    reset_password,
     send_email_verification_code,
+    send_password_reset_code,
     verify_email_verification_code,
 )
 from common.exceptions import ApiError, ErrorCode
@@ -309,6 +315,122 @@ class VerifyEmailVerificationCodeView(APIView):
         serializer.is_valid(raise_exception=True)
         verify_email_verification_code(**serializer.validated_data)
         return ApiResponse(data={"message": "인증번호가 확인되었습니다."})
+
+
+class PasswordResetRequestView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="비밀번호 재설정 인증번호 발송",
+        description=(
+            "가입 여부를 노출하지 않도록 이메일 존재 여부와 무관하게 동일한 성공 "
+            "응답을 반환하며, 가입된 이메일에만 인증번호를 발송합니다."
+        ),
+        tags=["Auth"],
+        auth=[],
+        request=PasswordResetRequestSerializer,
+        responses={
+            200: OpenApiResponse(
+                response=PasswordResetRequestSuccessResponseSerializer,
+                description="비밀번호 재설정 인증번호 발송 요청 성공",
+                examples=[
+                    OpenApiExample(
+                        "발송 요청 성공",
+                        value={
+                            "success": True,
+                            "data": {"message": "인증번호가 발송되었습니다."},
+                            "error": None,
+                        },
+                        response_only=True,
+                    )
+                ],
+            ),
+            422: OpenApiResponse(
+                response=ErrorResponseSerializer,
+                description="이메일 필드 누락 또는 형식 검증 실패",
+            ),
+            500: OpenApiResponse(
+                response=ErrorResponseSerializer,
+                description="인증번호 저장 또는 이메일 발송 실패",
+            ),
+        },
+        examples=[
+            OpenApiExample(
+                "비밀번호 재설정 인증번호 요청",
+                value={"email": "traveler@example.com"},
+                request_only=True,
+            )
+        ],
+    )
+    def post(self, request):
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        send_password_reset_code(email=serializer.validated_data["email"])
+        return ApiResponse(data={"message": "인증번호가 발송되었습니다."})
+
+
+class PasswordResetConfirmView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="비밀번호 재설정 확인",
+        description=(
+            "이메일 인증번호와 새 비밀번호를 검증한 뒤 인증번호를 소비하고 "
+            "사용자의 비밀번호를 변경합니다."
+        ),
+        tags=["Auth"],
+        auth=[],
+        request=PasswordResetConfirmSerializer,
+        responses={
+            200: OpenApiResponse(
+                response=PasswordResetConfirmSuccessResponseSerializer,
+                description="비밀번호 재설정 성공",
+                examples=[
+                    OpenApiExample(
+                        "비밀번호 재설정 성공",
+                        value={
+                            "success": True,
+                            "data": {"success": True},
+                            "error": None,
+                        },
+                        response_only=True,
+                    )
+                ],
+            ),
+            400: OpenApiResponse(
+                response=ErrorResponseSerializer,
+                description="인증번호 불일치, 만료 또는 이미 사용됨",
+            ),
+            422: OpenApiResponse(
+                response=ErrorResponseSerializer,
+                description="필드 형식 또는 새 비밀번호 정책 검증 실패",
+            ),
+            500: OpenApiResponse(
+                response=ErrorResponseSerializer,
+                description="서버 내부 오류",
+            ),
+        },
+        examples=[
+            OpenApiExample(
+                "비밀번호 재설정 요청",
+                value={
+                    "email": "traveler@example.com",
+                    "code": "123456",
+                    "newPw": "new-safe-password-123",
+                },
+                request_only=True,
+            )
+        ],
+    )
+    def post(self, request):
+        serializer = PasswordResetConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reset_password(
+            email=serializer.validated_data["email"],
+            code=serializer.validated_data["code"],
+            new_password=serializer.validated_data["newPw"],
+        )
+        return ApiResponse(data={"success": True})
 
 
 class SignupView(APIView):

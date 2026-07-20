@@ -6,7 +6,7 @@ from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
 
-from accounts.models import EmailVerificationCode
+from accounts.models import EmailVerificationCode, User
 from common.exceptions import ApiError, ErrorCode
 
 
@@ -75,3 +75,32 @@ def verify_email_verification_code(
         raise ApiError(ErrorCode.CODE_EXPIRED)
 
     return verification
+
+
+def send_password_reset_code(*, email: str) -> None:
+    if User.objects.filter(email=email).exists():
+        send_email_verification_code(
+            email=email,
+            purpose=EmailVerificationCode.Purpose.PASSWORD_RESET,
+        )
+
+
+def reset_password(*, email: str, code: str, new_password: str) -> User:
+    with transaction.atomic():
+        verification = verify_email_verification_code(
+            email=email,
+            code=code,
+            purpose=EmailVerificationCode.Purpose.PASSWORD_RESET,
+            for_update=True,
+        )
+        try:
+            user = User.objects.select_for_update().get(email=email)
+        except User.DoesNotExist:
+            raise ApiError(ErrorCode.CODE_MISMATCH)
+
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
+        verification.is_used = True
+        verification.save(update_fields=["is_used"])
+
+    return user

@@ -69,6 +69,26 @@ class VerifyEmailVerificationCodeSuccessResponseSerializer(serializers.Serialize
     error = serializers.JSONField(allow_null=True)
 
 
+class PasswordResetRequestDataSerializer(serializers.Serializer):
+    message = serializers.CharField(help_text="비밀번호 재설정 인증번호 발송 결과")
+
+
+class PasswordResetRequestSuccessResponseSerializer(serializers.Serializer):
+    success = serializers.BooleanField()
+    data = PasswordResetRequestDataSerializer()
+    error = serializers.JSONField(allow_null=True)
+
+
+class PasswordResetConfirmDataSerializer(serializers.Serializer):
+    success = serializers.BooleanField(help_text="비밀번호 재설정 성공 여부")
+
+
+class PasswordResetConfirmSuccessResponseSerializer(serializers.Serializer):
+    success = serializers.BooleanField()
+    data = PasswordResetConfirmDataSerializer()
+    error = serializers.JSONField(allow_null=True)
+
+
 class ApiErrorDetailSerializer(serializers.Serializer):
     code = serializers.CharField(help_text="클라이언트가 분기 처리할 에러 코드")
     message = serializers.CharField(help_text="사용자에게 표시할 수 있는 에러 메시지")

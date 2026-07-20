@@ -315,6 +315,170 @@ POST /api/v1/auth/logout  -> LogoutView  (name="logout")
 
 현재 6.2절 엔드포인트 목록에는 refresh token으로 access token을 재발급받는 `POST /api/v1/auth/token/refresh` 같은 엔드포인트가 없다. 즉 로그인 응답으로 `refreshToken`을 내려주지만, 클라이언트가 이를 실제로 소비할 방법이 아직 명세에 없다. Notion 명세에 해당 엔드포인트가 있는지 확인이 필요하며, 없다면 access token 만료 시 재로그인을 강제하는 것으로 정할지 별도 결정이 필요하다 — 이번 `feature/auth-login` 범위에서는 임의로 추가하지 않는다 (0절 원칙 2).
 
+### 6.5 비밀번호 재설정 설계 (`feature/auth-password-reset`)
+
+대상은 `POST /api/v1/auth/password/reset-request`, `POST /api/v1/auth/password/reset-confirm` 두 엔드포인트다. `EmailVerificationCode`(이슈 #5)를 `purpose="password_reset"`으로 재사용하며 새 모델은 만들지 않는다.
+
+#### 6.5.1 이메일 존재 여부 비노출 정책
+
+`reset-request`는 요청한 이메일이 실제 가입된 계정인지와 무관하게 항상 동일한 성공 응답(`{"message": "인증번호가 발송되었습니다."}`)을 반환한다. 실제로 인증코드를 생성하고 메일을 발송하는 것은 서버 내부에서 `User.objects.filter(email=...).exists()`가 참일 때만 수행한다.
+
+**근거**: 존재하지 않는 이메일에 대해 응답을 다르게 하면(예: 404) 공격자가 이메일 목록을 순회해 어떤 이메일이 가입되어 있는지 알아낼 수 있다(User enumeration). 응답을 동일하게 유지하면서 실제 발송만 내부적으로 건너뛰면, 가입되지 않은 이메일로 "비밀번호 재설정" 메일이 나가는 것도 막을 수 있다.
+
+이 정책의 부수 효과로 `reset-confirm`에도 별도의 "이메일 존재 확인" 로직이 필요 없다 — 애초에 존재하지 않는 이메일에는 `EmailVerificationCode` 레코드가 생성되지 않으므로, 어떤 코드를 넣어도 `verify_email_verification_code`가 자연스럽게 `CODE_MISMATCH`로 처리한다.
+
+**한계**: 실제 발송 시 `send_mail` 호출(SMTP 왕복)이 추가되므로, 계정 존재 여부에 따라 응답 시간에 미세한 차이가 날 수 있다(timing side channel). 이번 스테이지에서는 별도의 더미 지연을 넣는 등의 완화 장치는 도입하지 않는다 — 응답 바디/상태 코드가 완전히 동일한 것만으로도 실무 기준을 충족한다고 보고, 타이밍 채널까지 막는 것은 과설계로 판단한다.
+
+#### 6.5.2 `POST /api/v1/auth/password/reset-request`
+
+**요청** (`PasswordResetRequestSerializer`)
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `email` | str | 재설정 코드를 받을 이메일 주소 |
+
+`purpose`는 클라이언트가 지정하지 않는다 — 이 엔드포인트 자체가 `password_reset` 목적 전용이므로 서비스 계층에서 고정한다. (기존 범용 `POST /api/v1/auth/email/verify-code`는 `purpose`를 파라미터로 받지만, 이 엔드포인트는 그와 별개의 전용 엔드포인트로 6.2절 표에 이미 명시되어 있다.)
+
+**서비스 로직** (`send_password_reset_code`, `accounts/services.py`)
+
+```python
+def send_password_reset_code(*, email: str) -> None:
+    if User.objects.filter(email=email).exists():
+        send_email_verification_code(
+            email=email,
+            purpose=EmailVerificationCode.Purpose.PASSWORD_RESET,
+        )
+```
+
+기존 `send_email_verification_code`(이슈 #5)를 그대로 재사용하고, 앞단에 존재 여부 체크만 추가한다.
+
+**뷰 로직** (`PasswordResetRequestView`, `permission_classes = [AllowAny]`)
+
+1. `PasswordResetRequestSerializer`로 `email` 형식만 검증한다.
+2. `send_password_reset_code(email=...)`를 호출한다 — 반환값과 무관하게 항상 성공 응답.
+
+**응답**
+
+```json
+{ "success": true, "data": { "message": "인증번호가 발송되었습니다." }, "error": null }
+```
+
+#### 6.5.3 `POST /api/v1/auth/password/reset-confirm`
+
+**요청** (`PasswordResetConfirmSerializer`)
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `email` | str | 인증번호를 발급받은 이메일 |
+| `code` | str | 6자리 인증번호. `VerifyEmailVerificationCodeSerializer`와 동일한 형식 검증(6자리 숫자) 적용 |
+| `newPw` | str | `write_only`. `AUTH_PASSWORD_VALIDATORS`를 모두 통과해야 함 |
+
+**정정(2026-07-19)**: 최초 초안은 "`SignupSerializer`와 동일한 `validate()`/`save()` 이중 검증 패턴"이라고 썼으나 부정확했다. `save()`/`create()`를 오버라이드해 소비 로직을 두는 것은 **새 리소스를 생성하는** `SignupSerializer`뿐이고, 액션성 엔드포인트(`LoginView`/`LogoutView`/`SendEmailVerificationCodeView`/`VerifyEmailVerificationCodeView`)는 전부 시리얼라이저에 `save()`를 두지 않고 **뷰가 서비스 함수를 직접 호출**하는 패턴이다. 비밀번호 재설정 확인은 리소스 생성이 아니라 기존 `User`를 변경하는 액션이므로 후자를 따른다.
+
+- 시리얼라이저(`PasswordResetConfirmSerializer`)는 `validate()`에서 락 없는 1차 검증(코드 일치 여부, 비밀번호 정책)만 수행하고 `save()`는 두지 않는다 — `VerifyEmailVerificationCodeSerializer`와 동일한 성격.
+- 실제 소비(트랜잭션 + `select_for_update` + `set_password` + `is_used` 갱신)는 `accounts/services.py`에 `reset_password(*, email, code, new_password)` 함수로 새로 추가하고, 뷰가 이를 호출한다 — `send_email_verification_code`/`verify_email_verification_code`와 같은 자리에 둔다.
+- 시리얼라이저 필드명은 `newPw`(API 계약)이지만 서비스 함수 인자명은 `new_password`(파이썬 관례)로 다르므로, 뷰에서 `**serializer.validated_data`로 그대로 넘기지 말고 명시적으로 매핑한다.
+
+```python
+# accounts/serializers.py
+def validate(self, attrs):
+    verify_email_verification_code(
+        email=attrs["email"],
+        code=attrs["code"],
+        purpose=EmailVerificationCode.Purpose.PASSWORD_RESET,
+    )
+
+    try:
+        user = User.objects.get(email=attrs["email"])
+    except User.DoesNotExist:
+        # 이론상 도달하지 않음: 6.5.1 정책상 존재하지 않는 이메일에는
+        # 애초에 EmailVerificationCode가 생성되지 않으므로 이 지점에
+        # 도달했다는 것 자체가 code가 일치했다는 뜻이다. 코드 발급과
+        # 확인 사이에 계정이 삭제된 극히 드문 레이스만 여기 해당하며,
+        # 새 에러 코드를 추가하는 대신 기존 CODE_MISMATCH로 뭉뚱그린다.
+        raise ApiError(ErrorCode.CODE_MISMATCH)
+
+    try:
+        validate_password(attrs["newPw"], user=user)
+    except DjangoValidationError as exc:
+        raise serializers.ValidationError({"newPw": exc.messages}) from exc
+
+    return attrs
+```
+
+```python
+# accounts/services.py
+def reset_password(*, email: str, code: str, new_password: str) -> User:
+    with transaction.atomic():
+        verification = verify_email_verification_code(
+            email=email,
+            code=code,
+            purpose=EmailVerificationCode.Purpose.PASSWORD_RESET,
+            for_update=True,
+        )
+        try:
+            user = User.objects.select_for_update().get(email=email)
+        except User.DoesNotExist:
+            # validate()와 동일한 극히 드문 레이스(코드 발급 후 계정 삭제)
+            # 대응 — 여기서도 독립적으로 재확인한다.
+            raise ApiError(ErrorCode.CODE_MISMATCH)
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
+        verification.is_used = True
+        verification.save(update_fields=["is_used"])
+    return user
+```
+
+`validate_password`에 새로 조회한 `User` 인스턴스를 넘겨 `UserAttributeSimilarityValidator`(아이디/이메일과 비슷한 비밀번호 거부) 등이 signup과 동일하게 작동하도록 한다.
+
+**뷰 로직** (`PasswordResetConfirmView`, `permission_classes = [AllowAny]`)
+
+1. `PasswordResetConfirmSerializer`로 1차 검증한다 (`serializer.is_valid(raise_exception=True)`).
+2. 필드명을 명시적으로 매핑해 `reset_password()`를 호출한다:
+   ```python
+   reset_password(
+       email=serializer.validated_data["email"],
+       code=serializer.validated_data["code"],
+       new_password=serializer.validated_data["newPw"],
+   )
+   ```
+3. 별도 데이터 가공 없이 응답한다.
+
+**응답**
+
+```json
+{ "success": true, "data": { "success": true }, "error": null }
+```
+
+**에러 코드**: 새 에러 코드를 추가하지 않는다. `CODE_MISMATCH`/`CODE_EXPIRED`/`CODE_ALREADY_USED`(이슈 #5)를 그대로 재사용하고, `newPw`가 비밀번호 정책을 통과하지 못하면 signup의 `pw` 필드와 동일하게 `serializers.ValidationError` → `COMMON_422` + `error.details`로 처리된다.
+
+#### 6.5.4 URL 등록 (`accounts/urls.py`)
+
+```
+POST /api/v1/auth/password/reset-request  -> PasswordResetRequestView  (name="password-reset-request")
+POST /api/v1/auth/password/reset-confirm  -> PasswordResetConfirmView  (name="password-reset-confirm")
+```
+
+#### 6.5.5 테스트 관점 (`tests/test_auth_password_reset.py`, 신규)
+
+- 재설정 요청 성공 — 가입된 이메일: 응답이 성공 형태이고, 이메일 백엔드에 발송 기록이 남는지 확인.
+- 재설정 요청 — 가입되지 않은 이메일: 가입된 이메일과 동일한 성공 응답이 오는지, 그리고 이메일이 실제로는 발송되지 않았는지(`mail.outbox` 비어있음) 함께 확인.
+- 재설정 확인 성공: 발급받은 코드와 새 비밀번호로 요청 → 응답 성공, 이후 새 비밀번호로 로그인 가능한지 확인.
+- 재설정 확인 실패 — 코드 불일치: `CODE_MISMATCH`, 400.
+- 재설정 확인 실패 — 코드 만료: `CODE_EXPIRED`, 400.
+- 재설정 확인 실패 — 이미 사용된 코드로 재시도: `CODE_ALREADY_USED`, 400.
+- 재설정 확인 실패 — 새 비밀번호가 정책 미달(예: 너무 짧음, 아이디와 유사): `COMMON_422` + `error.details.newPw`.
+- 재설정 확인 성공 후 같은 코드로 재요청: 이미 `is_used=True`이므로 `CODE_ALREADY_USED`.
+
+#### 6.5.6 미해결 사항 (이번 브랜치 범위 밖)
+
+비밀번호 재설정 성공 시 해당 사용자의 기존 refresh token들을 전부 블랙리스트에 등록해 다른 기기의 로그인 세션을 강제로 끊을지 여부는 이번 브랜치에서 다루지 않는다.
+
+**이번 브랜치 범위 밖으로 남기는 이유**:
+1. 이슈 완료조건 4가지(재설정 코드 발송/확인 플로우, 비밀번호 정책 통과, 이메일 존재 여부 비노출 정책, pytest 통과) 어디에도 세션 무효화가 포함되어 있지 않다 — 0절 원칙 2("없는 스펙을 임의로 만들지 않는다")에 따라 이번 범위에 임의로 추가하지 않는다.
+2. `token_blacklist` 앱은 이미 설치돼 있으므로(6.4.1) 기술적으로는 `OutstandingToken.objects.filter(user=user)`를 순회하며 `blacklist()` 처리하는 것으로 추가 의존성 없이 구현 가능하다 — 즉 "못 해서" 미루는 게 아니라 "이번 이슈 범위가 아니라서" 미루는 것이며, 필요해지면 별도 이슈/브랜치에서 바로 착수할 수 있다.
+3. 6.4.7과 동일하게, 로그인 관련 세션 정책은 한 번에 몰아 결정하기보다 실제 필요가 생겼을 때(예: 보안 요구사항이 명시적으로 들어올 때) 별도로 검토하는 편이 범위를 깔끔하게 유지한다.
+
 ## 7. 향후 앱 설계 (Notion 기능명세서 반영)
 
 아래는 Notion "기능명세서" DB의 각 그룹을 실제로 읽고 정리한 내용이다. CRUD 성격이 뚜렷한 모델은 필드까지 제시하고, 외부 API(날씨/카카오 로컬/한국도로공사) 연동이나 AI 큐레이션처럼 "모델보다 로직이 핵심"인 기능은 연동 지점만 표시했다. **실제 구현 시에도 이 문서와 Notion 원본이 어긋나면 Notion을 기준으로 삼는다** (섹션 끝 "Notion 원문 참조" 링크로 재확인).

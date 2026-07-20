@@ -54,6 +54,49 @@ class VerifyEmailVerificationCodeSerializer(serializers.Serializer):
     )
 
 
+class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField(help_text="비밀번호 재설정 코드를 받을 이메일 주소")
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    email = serializers.EmailField(help_text="인증번호를 발급받은 이메일 주소")
+    code = serializers.CharField(
+        min_length=6,
+        max_length=6,
+        validators=[
+            RegexValidator(
+                regex=r"^[0-9]{6}$",
+                message="인증번호는 6자리 숫자여야 합니다.",
+            )
+        ],
+        help_text="이메일로 전달받은 6자리 인증번호",
+    )
+    newPw = serializers.CharField(
+        write_only=True,
+        trim_whitespace=False,
+        help_text="Django 비밀번호 정책을 통과해야 하는 새 비밀번호",
+    )
+
+    def validate(self, attrs):
+        verify_email_verification_code(
+            email=attrs["email"],
+            code=attrs["code"],
+            purpose=EmailVerificationCode.Purpose.PASSWORD_RESET,
+        )
+
+        try:
+            user = User.objects.get(email=attrs["email"])
+        except User.DoesNotExist:
+            raise ApiError(ErrorCode.CODE_MISMATCH)
+
+        try:
+            validate_password(attrs["newPw"], user=user)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"newPw": exc.messages}) from exc
+
+        return attrs
+
+
 class SignupSerializer(serializers.Serializer):
     id = serializers.CharField(
         max_length=150,

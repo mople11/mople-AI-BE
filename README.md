@@ -1,6 +1,6 @@
 # 어디가남
 
-전남 날씨 기반 여행 추천 서비스의 Django REST Framework 백엔드입니다.
+전남 기반 여행 추천 서비스의 Django REST Framework 백엔드입니다.
 
 ## 현재 구현 범위
 

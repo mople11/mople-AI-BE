@@ -34,6 +34,16 @@ class ErrorCode(Enum):
         400,
         "이용약관에 동의해야 합니다.",
     )
+    EXTERNAL_API_ERROR = (
+        "EXTERNAL_API_ERROR",
+        502,
+        "외부 정보를 불러오지 못했습니다.",
+    )
+    PLACE_NOT_FOUND = (
+        "PLACE_NOT_FOUND",
+        404,
+        "장소 정보를 찾을 수 없습니다.",
+    )
 
     def __init__(self, code: str, status_code: int, message: str):
         self.code = code

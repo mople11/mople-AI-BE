@@ -12,6 +12,7 @@ env = environ.Env(
     JWT_ACCESS_TOKEN_LIFETIME_MIN=(int, 60),
     JWT_REFRESH_TOKEN_LIFETIME_DAYS=(int, 14),
     EMAIL_VERIFICATION_CODE_LIFETIME_MIN=(int, 5),
+    TOUR_API_TIMEOUT_SEC=(int, 5),
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
@@ -32,6 +33,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "common",
     "accounts",
+    "places",
 ]
 
 MIDDLEWARE = [
@@ -136,3 +138,10 @@ EMAIL_BACKEND = env(
     "EMAIL_BACKEND",
     default="django.core.mail.backends.console.EmailBackend",
 )
+
+TOUR_API_BASE_URL = env(
+    "TOUR_API_BASE_URL",
+    default="https://apis.data.go.kr/B551011/KorService2",
+)
+TOUR_API_SERVICE_KEY = env("TOUR_API_SERVICE_KEY", default="")
+TOUR_API_TIMEOUT_SEC = env("TOUR_API_TIMEOUT_SEC")

@@ -8,6 +8,7 @@ from accounts.views import (
     PasswordResetRequestView,
     SendEmailVerificationCodeView,
     SignupView,
+    SocialLoginView,
     VerifyEmailVerificationCodeView,
 )
 
@@ -16,6 +17,7 @@ app_name = "accounts"
 
 urlpatterns = [
     path("login", LoginView.as_view(), name="login"),
+    path("login/social", SocialLoginView.as_view(), name="login-social"),
     path("logout", LogoutView.as_view(), name="logout"),
     path(
         "password/reset-request",

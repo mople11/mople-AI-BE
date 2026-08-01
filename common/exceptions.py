@@ -34,6 +34,12 @@ class ErrorCode(Enum):
         400,
         "이용약관에 동의해야 합니다.",
     )
+    OAUTH_FAILED = ("OAUTH_FAILED", 401, "소셜 인증에 실패했습니다.")
+    SOCIAL_EMAIL_CONFLICT = (
+        "SOCIAL_EMAIL_CONFLICT",
+        409,
+        "이미 가입된 이메일과 연결된 계정입니다.",
+    )
 
     def __init__(self, code: str, status_code: int, message: str):
         self.code = code

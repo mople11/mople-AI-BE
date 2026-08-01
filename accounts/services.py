@@ -1,9 +1,10 @@
 import secrets
 from datetime import timedelta
+from hashlib import sha256
 
 from django.conf import settings
 from django.core.mail import send_mail
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from accounts.models import EmailVerificationCode, User
@@ -102,5 +103,51 @@ def reset_password(*, email: str, code: str, new_password: str) -> User:
         user.save(update_fields=["password"])
         verification.is_used = True
         verification.save(update_fields=["is_used"])
+
+    return user
+
+
+def find_or_create_social_user(
+    *,
+    provider: str,
+    provider_id: str,
+    email: str,
+    nickname: str,
+) -> User:
+    try:
+        return User.objects.get(provider=provider, provider_id=provider_id)
+    except User.DoesNotExist:
+        pass
+
+    if User.objects.filter(email=email).exists():
+        raise ApiError(ErrorCode.SOCIAL_EMAIL_CONFLICT)
+
+    username = f"{provider}_{provider_id}"
+    username_max_length = User._meta.get_field("username").max_length
+    if len(username) > username_max_length:
+        username = f"{provider}_{sha256(provider_id.encode()).hexdigest()}"
+
+    nickname_max_length = User._meta.get_field("nickname").max_length
+    user = User(
+        username=username,
+        email=email,
+        nickname=nickname[:nickname_max_length],
+        provider=provider,
+        provider_id=provider_id,
+    )
+    user.set_unusable_password()
+    try:
+        user.save()
+    except IntegrityError:
+        existing = User.objects.filter(
+            provider=provider, provider_id=provider_id
+        ).first()
+        if existing is not None:
+            return existing
+        if User.objects.filter(username=user.username).exists():
+            raise ApiError(ErrorCode.DUPLICATE_ID)
+        if User.objects.filter(email=user.email).exists():
+            raise ApiError(ErrorCode.SOCIAL_EMAIL_CONFLICT)
+        raise
 
     return user

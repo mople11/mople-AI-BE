@@ -7,12 +7,15 @@ from accounts.models import EmailVerificationCode, User
 @admin.register(User)
 class CustomUserAdmin(UserAdmin):
     fieldsets = UserAdmin.fieldsets + (
-        ("추가 정보", {"fields": ("nickname", "agreed_terms_at")}),
+        (
+            "추가 정보",
+            {"fields": ("nickname", "agreed_terms_at", "provider", "provider_id")},
+        ),
     )
     add_fieldsets = UserAdmin.add_fieldsets + (
         ("추가 정보", {"fields": ("email", "nickname")}),
     )
-    list_display = (*UserAdmin.list_display, "nickname", "email")
+    list_display = (*UserAdmin.list_display, "nickname", "email", "provider")
 
 
 @admin.register(EmailVerificationCode)

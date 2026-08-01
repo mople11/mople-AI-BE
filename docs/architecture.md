@@ -43,7 +43,7 @@ Eodiganam/
 │   ├── wsgi.py
 │   └── asgi.py
 ├── accounts/                      # Stage 1: 회원/인증 (Auth 그룹)
-│   ├── models.py                  # User, SocialAccount, EmailVerificationCode
+│   ├── models.py                  # User(provider/provider_id 포함), EmailVerificationCode
 │   ├── serializers.py
 │   ├── views.py
 │   ├── urls.py
@@ -153,13 +153,10 @@ DRF는 기본적으로 이 포맷을 강제하지 않으므로, `common/exceptio
 - `email` — 고유(unique) 제약 추가 (`AbstractUser` 기본은 unique 아님)
 - `nickname` — `CharField`, 신규 필드
 - `agreed_terms_at` — `DateTimeField(null=True)`, 약관 동의 시각 기록 (TERMS_NOT_AGREED 검증용)
-- 비밀번호는 Django 기본 `set_password`/`check_password` (PBKDF2, Django 기본 해셔) 사용 — 자체 해싱 구현 금지
-
-**`SocialAccount`**
-- `user` — FK to `User`
-- `provider` — `CharField`, choices: `google`, `kakao` (기존 `SocialLoginRequest.provider` Literal과 동일)
-- `provider_uid` — `CharField`
-- `(provider, provider_uid)` unique_together
+- `provider` — `CharField(choices=Provider.choices, null=True, blank=True)`, choices: `google`, `kakao` (`SocialLoginSerializer.provider`와 동일). 일반(아이디/비밀번호) 가입 유저는 `null`.
+- `provider_id` — `CharField(max_length=255, null=True, blank=True)`. 소셜 제공자가 내려주는 사용자 식별자(Google `sub`, Kakao `id`). 일반 가입 유저는 `null`.
+- `(provider, provider_id)` — `UniqueConstraint`. 별도 `SocialAccount` 모델은 두지 않는다(6.6절 참고) — 한 유저는 최대 하나의 소셜 계정만 연결한다는 현재 스펙(가입 화면에 소셜/일반 계정 다중 연결 UI가 없음)에서는 `User`에 직접 필드를 두는 편이 조인 없이 로그인 조회가 가능해 더 단순하다. 한 유저가 여러 소셜 제공자를 연결하는 요구사항이 생기면 그때 별도 모델로 분리한다.
+- 비밀번호는 Django 기본 `set_password`/`check_password` (PBKDF2, Django 기본 해셔) 사용 — 자체 해싱 구현 금지. 소셜 가입 유저는 비밀번호 로그인 경로가 없으므로 `set_unusable_password()`로 생성한다.
 
 **`EmailVerificationCode`**
 - `email` — `CharField`
@@ -175,7 +172,7 @@ DRF는 기본적으로 이 포맷을 강제하지 않으므로, `common/exceptio
 | `POST /api/v1/auth/signup` | `signup` | 회원가입 |
 | `GET /api/v1/auth/signup/check-id` | `check_id_duplicate` | 아이디 중복 확인 |
 | `POST /api/v1/auth/login` | `login` | 아이디/비밀번호 로그인 → JWT 발급 (6.4절) |
-| `POST /api/v1/auth/login/social` | `social_login` | 소셜 로그인 (google/kakao) |
+| `POST /api/v1/auth/login/social` | `social_login` | 소셜 로그인 (google/kakao, 6.6절) |
 | `POST /api/v1/auth/logout` | `logout` | 로그아웃 — refresh token을 `token_blacklist`에 등록해 무효화 (6.4절) |
 | `POST /api/v1/auth/email/verify-code` | `send_email_code` | 이메일 인증코드 발송 |
 | `POST /api/v1/auth/email/verify-confirm` | `verify_email_code` | 이메일 인증코드 확인 |
@@ -478,6 +475,147 @@ POST /api/v1/auth/password/reset-confirm  -> PasswordResetConfirmView  (name="pa
 1. 이슈 완료조건 4가지(재설정 코드 발송/확인 플로우, 비밀번호 정책 통과, 이메일 존재 여부 비노출 정책, pytest 통과) 어디에도 세션 무효화가 포함되어 있지 않다 — 0절 원칙 2("없는 스펙을 임의로 만들지 않는다")에 따라 이번 범위에 임의로 추가하지 않는다.
 2. `token_blacklist` 앱은 이미 설치돼 있으므로(6.4.1) 기술적으로는 `OutstandingToken.objects.filter(user=user)`를 순회하며 `blacklist()` 처리하는 것으로 추가 의존성 없이 구현 가능하다 — 즉 "못 해서" 미루는 게 아니라 "이번 이슈 범위가 아니라서" 미루는 것이며, 필요해지면 별도 이슈/브랜치에서 바로 착수할 수 있다.
 3. 6.4.7과 동일하게, 로그인 관련 세션 정책은 한 번에 몰아 결정하기보다 실제 필요가 생겼을 때(예: 보안 요구사항이 명시적으로 들어올 때) 별도로 검토하는 편이 범위를 깔끔하게 유지한다.
+
+### 6.6 소셜 로그인 설계 (`feature/auth-social-login`)
+
+대상은 `POST /api/v1/auth/login/social` 한 엔드포인트다. Notion "소셜 로그인" API 명세(`32804d37-4d27-837b-9dba-81d8e278df9e`) 기준으로 `provider`는 `google`/`kakao` 두 값만 허용한다 — 회원가입 화면 UI 명세에 남아있는 "깃허브로 가입" 문구는 스테일로 판단하고 이번 구현 범위에서 제외한다(0절 원칙 2).
+
+#### 6.6.1 인증 흐름
+
+```
+클라이언트가 Google/Kakao SDK로 발급받은 토큰(oauthToken)
+    ↓
+POST /api/v1/auth/login/social { provider, oauthToken }
+    ↓
+provider별 토큰 검증 (accounts/google.py 또는 accounts/kakao.py)
+    ↓
+(provider, provider_id)로 회원 조회 → 있으면 그 유저로 로그인
+    ↓ (없으면)
+동일 email의 기존 계정 존재 여부 확인
+    → 있으면 SOCIAL_EMAIL_CONFLICT(409)
+    → 없으면 신규 User 생성(자동 회원가입)
+    ↓
+RefreshToken.for_user(user)로 JWT 발급
+```
+
+Google/Kakao 연동 로직을 각각 `accounts/google.py`/`accounts/kakao.py`로 분리해 뷰가 검증 방식의 세부사항(서명 검증 라이브러리, 외부 API 호출)을 알 필요가 없게 한다 — 참고한 사내 설계 문서("Google OAuth와 자체 JWT 인증 연동 설계")의 책임 분리 방향을 그대로 따른다. 회원 조회/생성은 `accounts/services.py`의 `find_or_create_social_user`가 담당하고, JWT 발급은 기존 로그인(6.4절)과 동일하게 `RefreshToken.for_user()`를 재사용한다.
+
+#### 6.6.2 `accounts/google.py` — Google ID Token 검증
+
+`google-auth` 패키지의 `google.oauth2.id_token.verify_oauth2_token()`을 사용한다. 이 함수가 다음을 한 번에 수행하므로 서명 검증을 직접 구현하지 않는다(0절 원칙 3):
+
+- Google의 공개키(JWKS)로 토큰 서명을 검증
+- `aud` 클레임이 `settings.GOOGLE_CLIENT_ID`와 일치하는지 확인
+- `iss`, `exp` 등 표준 클레임 검증
+
+검증 실패(서명 불일치, `aud` 불일치, 만료 등)는 모두 `ValueError`/`GoogleAuthError`로 올라오므로 `ApiError(ErrorCode.OAUTH_FAILED)`로 변환한다. 검증에 성공하면 클레임에서 `sub`(→ `provider_id`), `email`, `name`(→ `nickname`, 없으면 이메일 로컬파트로 대체)을 추출해 반환한다. `sub` 또는 `email`이 없거나 `email_verified`가 `true`가 아니면 Google이 신뢰할 수 있는 계정 식별 정보로 간주하지 않고 `OAUTH_FAILED`로 처리한다.
+
+#### 6.6.3 `accounts/kakao.py` — Kakao 사용자 조회
+
+Kakao는 ID Token이 아니라 클라이언트가 카카오 SDK로 발급받은 액세스 토큰을 그대로 넘겨받는다. 이 토큰으로 `GET https://kapi.kakao.com/v2/user/me`를 `Authorization: Bearer {oauthToken}` 헤더로 호출해 사용자 정보를 조회하는 것 자체가 토큰 검증이다(호출이 401이면 유효하지 않은 토큰).
+
+**이메일이 없는 경우(placeholder 이메일)**: 원래는 `kakao_account.email`이 없으면 `OAUTH_FAILED`로 처리할 계획이었으나, 실제 앱으로 검증하는 과정(6.6.9절)에서 카카오의 `account_email` 동의항목이 **사업자 등록이 없는 계정은 신청 자격 자체가 없다**는 것이 확인되어 방침을 변경했다. 이메일이 없으면 실패시키는 대신 `kakao_{provider_id}@users.eodiganam.local` 형태의 placeholder 이메일을 생성해 정상적으로 가입을 진행한다. `provider_id`가 카카오 계정별로 유니크하므로 이 placeholder도 자동으로 유니크하다 — 다른 유저의 이메일과 충돌할 일이 없고(`SOCIAL_EMAIL_CONFLICT` 오탐 없음), 실제 사용자 이메일 주소가 아니므로 이 계정에는 이메일 발송 기반 기능(비밀번호 재설정 등)이 동작하지 않는다는 한계는 있다. `nickname`도 마찬가지로 `kakao_account.profile.nickname`이 없으면(닉네임 동의항목도 별도로 켜야 함) `카카오사용자{provider_id 뒤 6자리}` 형태로 대체한다.
+
+`KAKAO_REST_API_KEY`는 이번 호출(`/v2/user/me`)에는 사용하지 않는다 — 이 엔드포인트는 사용자 액세스 토큰만으로 인증되고, REST API 키는 인가 코드 교환 등 별도 흐름에서 필요하다. 다만 이후 카카오 로컬 API(7.2절 코스 동선 최적화) 연동 등에서 재사용할 것을 감안해 `.env`에 자리만 미리 마련해 둔다.
+
+#### 6.6.4 에러 코드 추가
+
+| 코드 | 상태코드 | 메시지 | 발생 조건 |
+|---|---|---|---|
+| `OAUTH_FAILED` | 401 | 소셜 인증에 실패했습니다. | Google ID Token 서명/`aud` 검증 실패(이메일 클레임 없음 포함), 또는 Kakao `/v2/user/me` 호출 실패(401 등, 유효하지 않은 액세스 토큰) |
+| `SOCIAL_EMAIL_CONFLICT` | 409 | 이미 가입된 이메일과 연결된 계정입니다. | 신규 소셜 로그인 시도 시 동일 `email`의 `User`가 이미 존재(다른 provider 또는 일반 가입)하는 경우 |
+
+**이메일 충돌을 자동 연결하지 않고 에러로 처리하는 이유**: Kakao는 이메일 소유권을 검증하지 않고 카카오 계정에 등록된 이메일을 그대로 내려줄 수 있어, 이미 가입된 이메일에 소셜 로그인을 자동으로 연결하면 계정 탈취(account takeover) 경로가 생긴다. 프론트에는 `SOCIAL_EMAIL_CONFLICT`를 받으면 기존 계정으로 로그인하도록 안내하는 것을 권장하되, 그 UX 처리는 이번 백엔드 구현 범위 밖이다.
+
+#### 6.6.5 `find_or_create_social_user` (`accounts/services.py`)
+
+```python
+def find_or_create_social_user(*, provider, provider_id, email, nickname) -> User:
+    try:
+        return User.objects.get(provider=provider, provider_id=provider_id)
+    except User.DoesNotExist:
+        pass
+
+    if User.objects.filter(email=email).exists():
+        raise ApiError(ErrorCode.SOCIAL_EMAIL_CONFLICT)
+
+    username = f"{provider}_{provider_id}"
+    if len(username) > 150:
+        username = f"{provider}_{sha256(provider_id.encode()).hexdigest()}"
+
+    user = User(
+        username=username,
+        email=email,
+        nickname=nickname[:50],
+        provider=provider,
+        provider_id=provider_id,
+    )
+    user.set_unusable_password()
+    user.save()
+    return user
+```
+
+- 신규 가입 시 `username`은 `signup`처럼 클라이언트가 지정하지 않으므로 `{provider}_{provider_id}` 형식으로 자동 생성한다. 150자를 넘는 비정상적으로 긴 provider ID는 조용히 잘라 충돌시키지 않고 SHA-256 해시 기반 username으로 대체한다.
+- 외부 제공자가 내려준 닉네임은 `User.nickname`의 최대 길이인 50자로 제한해 DB 저장 단계에서 길이 초과 오류가 발생하지 않게 한다.
+- `(provider, provider_id)` 조회와 `email` 중복 체크 사이의 레이스(동시에 같은 계정으로 두 번 로그인)로 `IntegrityError`가 나면 `(provider, provider_id)`로 재조회해 이미 생성된 유저를 반환한다. 그 외에는 username과 email 충돌을 각각 재확인해 `DUPLICATE_ID` 또는 `SOCIAL_EMAIL_CONFLICT`로 구분하고, 알려진 충돌이 아니면 원본 예외를 다시 발생시킨다.
+
+#### 6.6.6 응답
+
+`POST /auth/login/social` 응답은 로그인(6.4.3절) `AuthTokenResponse`와 동일한 형태를 그대로 재사용한다(별도 스키마 없음).
+
+```json
+{
+  "success": true,
+  "data": {
+    "accessToken": "eyJ...",
+    "refreshToken": "eyJ...",
+    "user": { "id": "google_1029384756", "nickname": "여행자" }
+  },
+  "error": null
+}
+```
+
+#### 6.6.7 환경 변수
+
+```
+GOOGLE_CLIENT_ID=change-me-in-env
+KAKAO_REST_API_KEY=change-me-in-env
+```
+
+이번 이슈 시점에는 실제 Google/Kakao 클라이언트 ID가 아직 발급되지 않아 `.env.example`에 placeholder만 추가한다. `GOOGLE_CLIENT_ID`가 비어 있으면 `verify_oauth2_token`의 `aud` 검증이 항상 실패해 모든 Google 로그인 요청이 `OAUTH_FAILED`가 되므로, 실제 값 발급 전에는 Google 소셜 로그인이 정상 동작하지 않는다(테스트는 검증 함수 자체를 mock 처리하므로 영향받지 않는다). 실제 값 발급 후 통합 스모크 테스트는 별도 후속 작업으로 남긴다.
+
+#### 6.6.8 테스트 관점 (`tests/test_auth_social_login.py`, 신규)
+
+API 흐름 테스트에서는 `accounts.views.verify_google_id_token`/`accounts.views.verify_kakao_token`을 mock 처리한다. 검증 함수 자체의 테스트에서는 Google의 `id_token.verify_oauth2_token`과 Kakao의 `requests.get`처럼 실제 외부 통신 지점만 mock 처리해 클레임 및 응답 파싱 로직을 직접 실행한다.
+
+- Google 로그인 성공 — 신규 `provider_id`: 응답에 `accessToken`/`refreshToken`/`user`가 있고, `User.objects.get(provider="google", provider_id=...)`가 생성되어 있으며 `has_usable_password()`가 `False`인지 확인.
+- Google 로그인 성공 — 이미 연결된 `provider_id`: 새 유저를 만들지 않고 기존 유저로 로그인되는지 확인(생성 건수 비교).
+- Google 로그인 실패 — 토큰 검증 실패: `OAUTH_FAILED`, 401.
+- Google 로그인 실패 — `sub`/`email` 누락 또는 `email_verified=false`: `OAUTH_FAILED`, 401.
+- Google 로그인 실패 — 동일 이메일의 기존(일반 가입) 계정 존재: `SOCIAL_EMAIL_CONFLICT`, 409.
+- Kakao 로그인 성공 — 신규 `provider_id`.
+- Kakao 로그인 성공 — `kakao_account.email` 없음(이메일 동의항목 미승인 상태): 실패하지 않고 `kakao_{provider_id}@users.eodiganam.local` placeholder 이메일로 가입되는지 확인.
+- Kakao 로그인 — 같은 `provider_id`로 이메일 없이 재로그인: placeholder 이메일 계정이 중복 생성되지 않고 재사용되는지 확인.
+- Kakao 로그인 실패 — `/v2/user/me` 호출이 200이 아님: `OAUTH_FAILED`, 401.
+- Kakao 로그인 실패 — 네트워크 오류, JSON 파싱 실패 또는 `id` 누락: `OAUTH_FAILED`, 401.
+- `provider`에 `google`/`kakao` 이외 값(예: `github`) 요청 시 `COMMON_422`.
+
+#### 6.6.9 실제 Kakao 앱으로 검증한 결과 (2026-07-30)
+
+Kakao REST API 키(`eodiganam` 앱)를 발급받아 실제 카카오 서버로 수동 스모크 테스트를 진행했다.
+
+- 인가 코드 요청(`kauth.kakao.com/oauth/authorize`) → 코드 → 액세스 토큰 교환(`kauth.kakao.com/oauth/token`)까지는 정상 동작 확인.
+- **`/v2/user/me` 응답에 `kakao_account`가 아예 오지 않음** — 이 앱의 "동의항목"에서 `account_email`(카카오계정 이메일) 상태가 "미연동"이고 [설정] 버튼조차 없기 때문. 닉네임/프로필사진/친구목록과 달리 이메일·전화번호·생일·성별 등은 Kakao 문서(`docs/ko/kakaologin/prerequisite#additional-features`) 기준 **비즈 앱 전환 + 사업자 정보 심사를 마쳐야 "추가 기능 신청" 자체가 가능**하고, 신청 후에도 영업일 3~5일 심사가 필요하다. **사업자 등록이 불가능한 학교 프로젝트 계정이라 이메일 동의항목 신청 자격 자체가 없다** — "언젠가 승인받으면"이 아니라 이 프로젝트 범위에서는 구조적으로 막혀 있다.
+- 처음엔(방침 변경 전) 이 실제 토큰으로 `POST /api/v1/auth/login/social`(`provider=kakao`)을 호출해 `OAUTH_FAILED`(401)가 반환되는 것까지 확인했었다. 하지만 이메일 동의가 원천적으로 불가능하다는 게 확정된 이상, 원래 완료조건("Kakao 이메일 누락 시 OAUTH_FAILED")대로 두면 **이 서비스에서 카카오 로그인은 어떤 실사용자도 쓸 수 없는 기능**이 된다. 그래서 6.6.3절과 같이 이메일 누락 시 실패 대신 placeholder 이메일로 가입을 진행하도록 방침을 바꿨다 — Notion 명세에는 없는 결정이지만, 사업자 인증 불가라는 확인된 제약 위에서 기능을 실제로 동작시키기 위한 의도적 변경이다(0절 원칙 2의 "없는 스펙을 임의로 만들지 않는다"와는 별개로, 이미 있는 스펙이 실행 불가능함을 확인하고 대체 경로를 마련한 경우).
+- 방침 변경 후 실제 토큰으로 재검증하려 했으나, 그 사이 사용자가 카카오톡 앱에서 `eodiganam` 연결을 끊어 토큰이 만료(`this access token does not exist`)되어 재시도하지 못했다. 대신 유닛 테스트(`test_kakao_login_missing_email_still_signs_up_with_placeholder_email` 등, 6.6.8절)가 실제로 관찰된 응답 형태(`kakao_account` 키 자체가 없음)를 그대로 mock해 동일 동작을 검증한다.
+
+#### 6.6.10 미해결 사항 (이번 브랜치 범위 밖)
+
+- placeholder 이메일 계정은 이메일 발송 기반 기능(비밀번호 재설정 등)을 쓸 수 없다 — 필요해지면 소셜 전용 계정에 대한 별도 안내/UX를 정의해야 한다.
+- 닉네임 동의항목(`profile_nickname`)은 심사 없이 켤 수 있으므로, 실제 배포 전에 콘솔에서 활성화해두면 `카카오사용자{id}` 대신 실제 닉네임이 표시된다 — 코드 변경은 필요 없고 콘솔 설정만 남은 작업.
+- 실제 Google 클라이언트 ID 발급 후 통합 스모크 테스트(6.6.7절).
+- 한 유저가 여러 소셜 제공자를 동시에 연결하는 시나리오(현재는 `User`당 `(provider, provider_id)` 하나) — 필요해지면 6.1절에서 언급한 대로 별도 `SocialAccount` 모델로 분리 검토.
+- `SOCIAL_EMAIL_CONFLICT` 발생 시 기존 계정에 소셜 로그인을 연결(link)하는 플로우(예: 비밀번호 재확인 후 연결) — Notion 명세에 없으므로 임의로 추가하지 않는다.
 
 ## 7. 향후 앱 설계 (Notion 기능명세서 반영)
 

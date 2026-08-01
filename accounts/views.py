@@ -11,6 +11,8 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from accounts.google import verify_google_id_token
+from accounts.kakao import verify_kakao_token
 from accounts.models import User
 from accounts.openapi import (
     AuthTokenSuccessResponseSerializer,
@@ -31,9 +33,11 @@ from accounts.serializers import (
     PasswordResetRequestSerializer,
     SendEmailVerificationCodeSerializer,
     SignupSerializer,
+    SocialLoginSerializer,
     VerifyEmailVerificationCodeSerializer,
 )
 from accounts.services import (
+    find_or_create_social_user,
     reset_password,
     send_email_verification_code,
     send_password_reset_code,
@@ -160,6 +164,119 @@ class LogoutView(APIView):
 
         refresh.blacklist()
         return ApiResponse()
+
+
+class SocialLoginView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="소셜 로그인",
+        description=(
+            "Google ID Token 또는 Kakao 액세스 토큰을 검증해 사용자를 조회하거나 "
+            "신규 생성하고 JWT access token과 refresh token을 발급합니다."
+        ),
+        tags=["Auth"],
+        auth=[],
+        request=SocialLoginSerializer,
+        responses={
+            200: OpenApiResponse(
+                response=AuthTokenSuccessResponseSerializer,
+                description="소셜 로그인 성공",
+                examples=[
+                    OpenApiExample(
+                        "소셜 로그인 성공",
+                        value={
+                            "success": True,
+                            "data": {
+                                "accessToken": "eyJ...",
+                                "refreshToken": "eyJ...",
+                                "user": {"id": "google_1029384756", "nickname": "여행자"},
+                            },
+                            "error": None,
+                        },
+                        response_only=True,
+                    )
+                ],
+            ),
+            401: OpenApiResponse(
+                response=ErrorResponseSerializer,
+                description="소셜 인증 실패 (토큰 검증 실패 또는 이메일 확인 불가)",
+                examples=[
+                    OpenApiExample(
+                        "소셜 인증 실패",
+                        value={
+                            "success": False,
+                            "data": None,
+                            "error": {
+                                "code": "OAUTH_FAILED",
+                                "message": "소셜 인증에 실패했습니다.",
+                            },
+                        },
+                        response_only=True,
+                    )
+                ],
+            ),
+            409: OpenApiResponse(
+                response=ErrorResponseSerializer,
+                description="동일한 이메일로 가입된 계정이 이미 존재함",
+                examples=[
+                    OpenApiExample(
+                        "이메일 충돌",
+                        value={
+                            "success": False,
+                            "data": None,
+                            "error": {
+                                "code": "SOCIAL_EMAIL_CONFLICT",
+                                "message": "이미 가입된 이메일과 연결된 계정입니다.",
+                            },
+                        },
+                        response_only=True,
+                    )
+                ],
+            ),
+            422: OpenApiResponse(
+                response=ErrorResponseSerializer,
+                description="provider 또는 oauthToken 필드 누락 또는 형식 검증 실패",
+            ),
+        },
+        examples=[
+            OpenApiExample(
+                "소셜 로그인 요청",
+                value={"provider": "google", "oauthToken": "eyJ..."},
+                request_only=True,
+            )
+        ],
+    )
+    def post(self, request):
+        serializer = SocialLoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        provider = serializer.validated_data["provider"]
+        oauth_token = serializer.validated_data["oauthToken"]
+
+        if provider == User.Provider.GOOGLE:
+            profile = verify_google_id_token(oauth_token)
+        else:
+            profile = verify_kakao_token(oauth_token)
+
+        user = find_or_create_social_user(
+            provider=provider,
+            provider_id=profile["provider_id"],
+            email=profile["email"],
+            nickname=profile["nickname"],
+        )
+
+        refresh = RefreshToken.for_user(user)
+        return ApiResponse(
+            data={
+                "accessToken": str(refresh.access_token),
+                "refreshToken": str(refresh),
+                "user": {
+                    "id": user.username,
+                    "nickname": user.nickname,
+                },
+            }
+        )
 
 
 class SendEmailVerificationCodeView(APIView):

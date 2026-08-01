@@ -136,3 +136,6 @@ EMAIL_BACKEND = env(
     "EMAIL_BACKEND",
     default="django.core.mail.backends.console.EmailBackend",
 )
+
+GOOGLE_CLIENT_ID = env("GOOGLE_CLIENT_ID", default="")
+KAKAO_REST_API_KEY = env("KAKAO_REST_API_KEY", default="")

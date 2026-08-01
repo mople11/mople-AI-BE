@@ -27,6 +27,16 @@ class LogoutSerializer(serializers.Serializer):
     refreshToken = serializers.CharField(help_text="로그인 시 발급받은 refresh token")
 
 
+class SocialLoginSerializer(serializers.Serializer):
+    provider = serializers.ChoiceField(
+        choices=User.Provider.choices,
+        help_text="소셜 로그인 제공자(google 또는 kakao)",
+    )
+    oauthToken = serializers.CharField(
+        help_text="Google ID Token 또는 Kakao 액세스 토큰",
+    )
+
+
 class SendEmailVerificationCodeSerializer(serializers.Serializer):
     email = serializers.EmailField(help_text="인증번호를 받을 이메일 주소")
     purpose = serializers.ChoiceField(

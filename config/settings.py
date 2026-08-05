@@ -141,6 +141,9 @@ EMAIL_BACKEND = env(
     default="django.core.mail.backends.console.EmailBackend",
 )
 
+GOOGLE_CLIENT_ID = env("GOOGLE_CLIENT_ID", default="")
+KAKAO_REST_API_KEY = env("KAKAO_REST_API_KEY", default="")
+
 TOUR_API_BASE_URL = env(
     "TOUR_API_BASE_URL",
     default="https://apis.data.go.kr/B551011/KorService2",

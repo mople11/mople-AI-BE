@@ -40,6 +40,16 @@ class ErrorCode(Enum):
         409,
         "이미 가입된 이메일과 연결된 계정입니다.",
     )
+    EXTERNAL_API_ERROR = (
+        "EXTERNAL_API_ERROR",
+        502,
+        "외부 정보를 불러오지 못했습니다.",
+    )
+    PLACE_NOT_FOUND = (
+        "PLACE_NOT_FOUND",
+        404,
+        "장소 정보를 찾을 수 없습니다.",
+    )
 
     def __init__(self, code: str, status_code: int, message: str):
         self.code = code

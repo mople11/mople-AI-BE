@@ -693,11 +693,208 @@ Notion 페이지: 설정, 온보딩
 - API 설계 페이지: `39504d37-4d27-806c-b05e-de375e0b1e6c`
 - 구현 중 세부 필드가 애매하면 위 ID를 Notion MCP `fetch`/`query_data_sources`로 다시 읽어 확인한다.
 
+### 7.11 `places` 앱 상세 설계 (Stage 2 실행용, GitHub 이슈 #12 기준 재설계)
+
+> **개정 이력**: 이전 버전은 통합 검색·장소 상세 2개 엔드포인트만 다루고 혼잡도·교통은 제외했었다. GitHub 이슈 #12(`mople11/mople-AI-BE#12`, "[Feature] 검색·장소 정보 API 구현")가 Notion "검색·정보" 그룹 4개 페이지 전체를 요구 범위로 지정했고, 사용자가 "이슈 #12대로 다시 설계"를 명시적으로 지시해 이번 개정으로 대체한다. 아래는 처음부터 다시 쓴 버전이며, 이전 버전의 결정(TourAPI write-through 캐시 등) 중 유효한 것은 유지하고 나머지는 갱신했다.
+
+이번 스테이지 범위는 Notion "검색·정보" 그룹 **4개 페이지 전부**다: **통합 검색**(`/search`), **장소 상세**(`/places/{placeId}`), **관광지 혼잡도**(`/places/{placeId}/congestion`), **실시간 교통 혼잡 안내**(`/traffic/congestion`). 아래 요청/응답 필드는 Notion API spec 페이지(각 페이지 ID는 7.10 참고 대신 아래 표로 대체 — 통합 검색 `a3204d37-4d27-83b0-b1b8-8131101c7f05`, 장소 상세 `c3204d37-4d27-821e-af59-81263fd33f1b`, 관광지 혼잡도 `9a104d37-4d27-83ab-8542-01f809bdf151`, 실시간 교통 혼잡 안내 `19604d37-4d27-8269-8969-81efe22666e2`)를 그대로 옮긴 것이다.
+
+#### 7.11.1 외부 API 매핑 및 데이터 소스 결정
+
+세 개의 서로 다른 외부 API를 쓴다. 매핑은 이슈 #12 기준으로 확정한다.
+
+| 기능 | 외부 API | 비고 |
+|---|---|---|
+| 통합 검색 / 장소 상세 | 한국관광공사 TourAPI | 실시간 호출 + 로컬 write-through 캐시(아래 근거 참고) |
+| 관광지 예상 방문 집중도 | 한국관광공사 관광지 집중률 방문자 추이 예측 API | KT 이동통신 데이터 기반 향후 30일 집중률을 사용한다. 실시간·시간대별 데이터가 아니므로 API와 화면에서 "예상 방문 집중도"로 명시한다. |
+| 실시간 교통 혼잡 안내 | 카카오모빌리티 길찾기 API | 경로별 예상 시간, 도로별 교통 상태와 대안 경로를 사용한다. Notion 원문의 "한국도로공사" 연동 지점은 카카오모빌리티로 정정한다. |
+
+**TourAPI는 write-through 캐시를 유지한다** (이전 버전 §7.11.1의 결정을 그대로 승계):
+
+1. Stage 3 이후(`Course`/`Review`/`Bookmark`/게이미피케이션)가 이미 로컬 장소 FK를 전제로 설계돼 있어, 안정적인 로컬 PK(`placeId`)가 필요하다.
+2. "실시간 연동"은 사전 대량 시딩을 하지 않고 조회 시점에 최신 데이터를 반영한다는 뜻으로 해석하며, 로컬 저장 자체를 금지하지 않는다.
+3. 검색/상세 모두 매 요청마다 TourAPI를 호출해 항상 최신 데이터를 보여주고, 로컬 테이블은 "이미 조회된 장소의 안정적 앵커" 역할만 한다.
+
+**관광지 집중률 / 카카오모빌리티는 로컬 캐시를 두지 않는다.** 집중률 예측과 교통 데이터는 외부 API의 최신 응답을 사용한다. 외부 데이터가 없거나 호출에 실패하면 기존 계약대로 HTTP 200과 빈 `data`를 반환한다.
+
+#### 7.11.2 모델
+
+**`TouristSpot`** (이전 버전의 `Place`를 대체하는 이름 — 이슈 #12 지시 그대로)
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `content_id` | `CharField`, unique | TourAPI `contentid`. 로컬 캐시 upsert의 조회 키 |
+| `name` | `CharField` | |
+| `category` | `CharField`, choices | `ATTRACTION`(관광지)/`RESTAURANT`(맛집)/`LODGING`(숙박)/`FESTIVAL`(축제). TourAPI `contenttypeid` → 매핑은 어댑터에서 변환(7.11.3). API 응답 시에는 한글 라벨(`get_category_display()`)로 직렬화해 통합 검색 요청의 `category` 파라미터 값("맛집|관광지|숙박|축제")과 어휘를 맞춘다 |
+| `address` | `CharField` | |
+| `description` | `TextField` | TourAPI 공통정보의 개요(overview) |
+| `hours` | `CharField`, blank 허용 | TourAPI 소개정보. 콘텐츠 타입별로 원본 필드명이 다르므로 어댑터에서 정규화. Notion 응답 필드명이 `hours`이므로 그대로 맞춘다 |
+| `latitude` / `longitude` | `DecimalField` | TourAPI `mapy`/`mapx` |
+| `sigungu` | `CharField`, blank 허용 | 통합 검색의 `region` 필터링용 내부 필드. 전남 시군 이름, 응답 필드로 노출하지 않는다 |
+| `parking_available` | `BooleanField(null=True, blank=True)` | TourAPI 소개정보(`detailIntro2`)에서 파싱. 정보가 없으면 `None`(→ 응답에서 `null`). 관광지 혼잡도 응답의 `parkingAvailable`에만 쓰인다 — 장소 상세 응답에는 노출하지 않는다(Notion 장소 상세 계약에 이 필드가 없음) |
+| `synced_at` | `DateTimeField` | 마지막 TourAPI upsert 시각 |
+
+이전 버전에 있던 `is_cultural_heritage` 필드는 제거했다 — Notion 응답 계약 어디에도 없는, 근거 없이 추가했던 필드였다(0절 원칙 2 위반이라 이번에 정리).
+
+**`TouristSpotImage`** (이전 버전 `PlaceImage`와 동일한 구조, FK만 이름 변경)
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `spot` | FK to `TouristSpot` | |
+| `image_url` | `URLField` | TourAPI가 내려주는 이미지 URL을 그대로 저장(파일 업로드 아님) |
+| `is_primary` | `BooleanField(default=False)` | |
+| `order` | `PositiveSmallIntegerField(default=0)` | TourAPI `detailImage` 응답 순서를 그대로 따른다 |
+
+혼잡도·교통 데이터는 별도 모델을 만들지 않는다 — 매 요청 실시간(mock) 호출 결과를 그대로 응답할 뿐, DB에 저장할 근거가 없다.
+
+#### 7.11.3 외부 API 어댑터 3종
+
+- **`places/tourapi.py` — `TourApiClient`**
+  - `requests`를 새 의존성으로 추가(`pyproject.toml`).
+  - 환경변수(`.env.example`): `TOUR_API_BASE_URL`, `TOUR_API_SERVICE_KEY`, `TOUR_API_TIMEOUT_SEC`(기본 5).
+  - 메서드: `search_spots(*, keyword=None, category=None, sigungu=None) -> list[RawSpot]`, `get_spot_detail(*, content_id: str) -> RawSpot | None`(공통정보+소개정보(`detailIntro2`, 주차장 필드 파싱 포함)+이미지정보 조합).
+  - 정확한 엔드포인트·파라미터·응답 필드명은 이 문서에서 확정하지 않는다 — 공식 문서로 최종 확인 후 이 어댑터 안에만 캡슐화한다. 조회 범위는 전남(area code) 한정.
+  - 호출 실패(타임아웃·5xx·파싱 오류)는 `TourApiError`를 던지고, 서비스 계층에서 `ApiError(ErrorCode.EXTERNAL_API_ERROR)`로 변환(7.11.4).
+- **`places/tourist_congestion.py` — `TouristCongestionClient`**
+  - 한국관광공사 `TatsCnctrRateService/tatsCnctrRatedList`를 호출한다.
+  - 관광지명과 전남 시군구 법정동 코드를 전달하고, 첫 날짜의 집중률과 향후 30일 중 집중률이 가장 낮은 추천일을 반환한다.
+  - 집중률은 34 미만 `여유`, 67 미만 `보통`, 그 이상 `혼잡`으로 변환한다.
+- **`places/kakao_mobility.py` — `KakaoMobilityClient`**
+  - 메서드: `get_traffic(*, origin: tuple[float, float], destination: tuple[float, float]) -> TrafficData | None`.
+  - 카카오모빌리티 Directions API를 호출해 기본 경로의 도로별 교통 상태와 ETA, 대안 경로 ETA를 반환한다.
+
+#### 7.11.4 에러 코드
+
+| 코드 | 상태코드 | 메시지 | 발생 조건 |
+|---|---|---|---|
+| `EXTERNAL_API_ERROR` | 502 | 외부 정보를 불러오지 못했습니다. | TourAPI 호출 타임아웃/5xx/응답 파싱 실패(검색·상세에만 해당) |
+| `PLACE_NOT_FOUND` | 404 | 장소 정보를 찾을 수 없습니다. | 장소 상세·관광지 혼잡도 조회 시 로컬 `placeId`가 없거나, 상세의 경우 TourAPI에 해당 `content_id`가 더 이상 존재하지 않음 |
+
+**`CONGESTION_DATA_UNAVAILABLE`, `TRAFFIC_DATA_UNAVAILABLE`은 `ApiError`로 만들지 않는다.** 둘 다 HTTP 200 + 빈 `data`로 응답해야 하는 정상 케이스이므로, 클라이언트가 `None`을 반환하면 뷰에서 `ApiResponse(data={})`로 처리한다.
+
+#### 7.11.5 서비스 계층 (`places/services.py`)
+
+- `search_spots(*, keyword, category, region) -> list[TouristSpot]`
+  1. `TourApiClient.search_spots(...)` 호출(카테고리 한글 라벨 → `contenttypeid` 변환은 어댑터 책임).
+  2. 각 결과를 `TouristSpot.objects.update_or_create(content_id=raw.content_id, defaults={...})`로 upsert, 대표 이미지 1장만 `TouristSpotImage`(`is_primary=True`)로 upsert.
+  3. `sort`는 TourAPI 기본 정렬을 패스스루(7.11.8). 페이지네이션 파라미터는 Notion 계약에 없으므로 이번 스테이지는 노출하지 않는다(7.11.8).
+- `get_spot_detail(*, place_id: int, user_lat=None, user_lng=None) -> tuple[TouristSpot, float | None]`
+  1. 로컬 `TouristSpot`을 `place_id`로 조회(없으면 `PLACE_NOT_FOUND`) → `content_id` 확보.
+  2. 항상 `TourApiClient.get_spot_detail(content_id=...)`를 실시간 호출. `None`이면(TourAPI에서 사라진 콘텐츠) `PLACE_NOT_FOUND`.
+  3. 받은 상세로 `TouristSpot`/`TouristSpotImage`(전체 갤러리) upsert.
+  4. `user_lat`/`user_lng`가 모두 주어지면 `calculate_distance_km`로 계산, 아니면 `None`.
+- `get_congestion(*, place_id: int) -> tuple[TouristSpot, CongestionData | None]`
+  1. 로컬 `TouristSpot`을 `place_id`로 조회(없으면 `PLACE_NOT_FOUND` — 장소 자체가 없는 것과 "혼잡도 데이터가 없는 것"은 다른 케이스로 구분).
+  2. `TouristCongestionClient.get_forecast(spot_name=..., sigungu=...)` 호출. 결과와 `TouristSpot.parking_available`을 뷰에서 조합한다. `parkingAvailable`은 집중률 API가 아니라 로컬 TourAPI 캐시값에서 채운다.
+- `get_traffic_congestion(*, origin, destination) -> TrafficData | None`
+  - 좌표 자체를 다루므로 로컬 장소 조회가 필요 없다. `KakaoMobilityClient.get_traffic(...)`을 그대로 호출.
+- `calculate_distance_km(lat1, lng1, lat2, lng2) -> float` — haversine 공식.
+
+#### 7.11.6 엔드포인트
+
+4개 엔드포인트가 하나의 URL prefix 아래 있지 않다(`/search`, `/places/{id}`, `/places/{id}/congestion`, `/traffic/congestion`). `config/urls.py`에는 이미 `path("", include("places.urls"))`로 루트 마운트가 되어 있으므로, `places/urls.py` 안에서 각 경로를 `api/v1/...` 형태로 전부 직접 명시한다. 뷰는 `accounts`와 동일하게 `APIView` 기반, `permission_classes = [AllowAny]`(Notion `authorization: none`).
+
+**`GET /api/v1/search`** — query: `keyword`, `category`(맛집/관광지/숙박/축제), `region`, `sort` — 전부 선택
+
+```json
+{
+  "success": true,
+  "data": {
+    "results": [
+      { "id": 1, "name": "...", "category": "관광지", "location": "...", "rating": 0, "thumbnail": "https://..." }
+    ]
+  },
+  "error": null
+}
+```
+
+`id`는 로컬 `TouristSpot` PK — 이후 `/places/{placeId}` 등에서 쓰는 값과 동일하다(Notion 명세엔 그냥 "id"라고만 돼 있지만, 다른 3개 엔드포인트의 `placeId`와 같은 값이어야 검색→상세 흐름이 이어진다). `location`은 `address`, `thumbnail`은 대표 이미지 URL. `rating`은 후기 집계가 없는 이번 스테이지엔 항상 `0` 고정값(리뷰 앱 완료 후 실제 값으로 교체, 7.11.8). 결과 없으면 `results: []`.
+
+**`GET /api/v1/places/{placeId}`** — query: 없음(Notion 명세엔 lat/lng가 query에 없지만, 이슈 #12가 "선택적 lat/lng 쿼리파라미터"를 명시적으로 요구하므로 `latitude`, `longitude`를 선택 쿼리 파라미터로 추가한다 — 계약 확장이지 축소가 아니라서 안전하다고 판단)
+
+```json
+{
+  "success": true,
+  "data": {
+    "placeId": 1,
+    "name": "...",
+    "category": "관광지",
+    "description": "...",
+    "address": "...",
+    "hours": "...",
+    "images": ["https://...", "https://..."],
+    "map": { "lat": 34.8, "lng": 126.4 },
+    "distanceFromUser": "12.3km",
+    "reviewSummary": { "avgRating": 0, "aiSatisfaction": null }
+  },
+  "error": null
+}
+```
+
+`distanceFromUser`는 Notion 명세 타입(`"string"`)에 맞춰 `"{km}km"` 형식의 문자열로 반환한다(예: `"12.3km"`). lat/lng 쿼리가 없으면 `null`. `reviewSummary`는 `reviews` 앱(Stage 4) 전까지 `avgRating: 0`, `aiSatisfaction: null` 고정값.
+
+**`GET /api/v1/places/{placeId}/congestion`**
+
+```json
+{
+  "success": true,
+  "data": {
+    "level": "보통",
+    "concentrationRate": 57.2,
+    "forecastDate": "2026-08-05",
+    "parkingAvailable": true,
+    "recommendedDate": "2026-08-10"
+  },
+  "error": null
+}
+```
+
+`TouristCongestionClient`가 일치하는 관광지 예측 데이터를 찾지 못하거나 호출에 실패하면 `{"success": true, "data": {}, "error": null}`로 응답한다.
+
+**`GET /api/v1/traffic/congestion`** — query: `origin.lat`, `origin.lng`, `destination.lat`, `destination.lng`
+
+```json
+{
+  "success": true,
+  "data": {
+    "segments": [{ "section": "...", "level": "원활" }],
+    "etaMin": 15,
+    "altRoute": { "available": true, "etaMin": 12 }
+  },
+  "error": null
+}
+```
+
+`KakaoMobilityClient`가 `None`을 반환하면(이번 스테이지는 항상 그렇다) `TRAFFIC_DATA_UNAVAILABLE`로 `{"success": true, "data": {}, "error": null}` 응답.
+
+#### 7.11.7 테스트 관점 (`tests/test_places_search.py`, `tests/test_places_detail.py`, `tests/test_places_congestion.py`, `tests/test_traffic_congestion.py`)
+
+`TourApiClient`/`TouristCongestionClient`/`KakaoMobilityClient`는 테스트에서 `unittest.mock.patch`로 HTTP 호출을 모킹한다.
+
+- 검색 성공: mock 2건 반환 → `id`/`name`/`category`/`location`/`thumbnail` 존재, `rating: 0`, `TouristSpot` upsert 확인.
+- 검색 결과 없음: `results: []`.
+- 검색 — TourAPI 실패(mock이 `TourApiError`): `EXTERNAL_API_ERROR`, 502.
+- 상세 조회 성공: `latitude`/`longitude` 쿼리 있을 때 `distanceFromUser` 계산됨, 없을 때 `null`. `reviewSummary`는 항상 고정값.
+- 상세 조회 — 존재하지 않는 `placeId`: `PLACE_NOT_FOUND`, 404.
+- 상세 조회 — 로컬엔 있지만 TourAPI가 더 이상 `content_id`를 반환 안 함(mock `None`): `PLACE_NOT_FOUND`, 404.
+- 혼잡도 — 존재하지 않는 `placeId`: `PLACE_NOT_FOUND`, 404.
+- 집중률 — 예측 데이터가 없을 때 200 + `data: {}`.
+- 집중률 — 현재 집중률, 기준일, 추천 방문일을 파싱하고 `parkingAvailable`을 로컬 `TouristSpot.parking_available`에서 채우는지 확인.
+- 교통 — `KakaoMobilityClient`가 `None`(기본 동작): 200 + `data: {}`.
+
+#### 7.11.8 미해결 사항 / 후속 작업
+
+1. 관광지 집중률은 실시간 현장 인원이나 시간대별 대기시간이 아니라 향후 30일의 일별 예측값이다. 화면과 API에서 이를 실시간 혼잡도로 표현하지 않는다.
+2. 집중률 API 관광지명과 TourAPI 장소명이 일치하지 않는 장소는 빈 데이터로 처리하며, 운영 데이터 확인 후 별도 매핑 테이블 도입을 검토한다.
+3. `rating`(통합 검색), `reviewSummary.avgRating`/`aiSatisfaction`(장소 상세)은 `reviews`/`interactions` 앱(Stage 4) 완료 전까지 고정값(`0`/`null`)으로 응답한다. Stage 4 완료 후 실제 집계값으로 교체한다.
+4. `sort` 쿼리 파라미터는 Notion 명세에 구체적 옵션이 없다 — 현재는 값을 받기만 하고 실제 정렬에는 반영하지 않는다(TourAPI 기본 정렬 그대로 반환). 통합 검색 페이지네이션도 노출하지 않는다. 프론트 요구사항 확인 후 별도 확정.
+5. 캐시 TTL 만료·오래된 `TouristSpot`/`TouristSpotImage` 정리 배치는 도입하지 않는다. 트래픽이 늘어 TourAPI 호출량이 문제가 되면 재검토.
+
 ## 8. 단계별 구현 계획
 
 - **Stage 0** — Django 프로젝트 뼈대: `config/` 생성, MySQL 연결, 빈 상태로 `manage.py migrate`/`runserver` 동작 확인. 도메인 앱 없음.
 - **Stage 1** — `accounts` 앱: 6절 모델/엔드포인트 구현. `common` 앱의 응답 포맷/에러 핸들러도 이 단계에서 함께 구현 (auth가 이를 바로 사용하므로).
-- **Stage 2** — `places` 앱: `Place`/`PlaceImage` 모델과 통합 검색/장소 상세 API. 혼잡도·교통 연동은 외부 API 확정 전까지 인터페이스만.
+- **Stage 2** — `places` 앱: `TouristSpot`/`TouristSpotImage` 모델과 통합 검색(`/search`)/장소 상세/관광지 예상 방문 집중도/실시간 교통 혼잡 안내 4개 API. TourAPI는 조회 시 로컬 write-through 캐시, 집중률은 관광공사 예측 API, 교통은 카카오모빌리티 Directions API를 사용한다.
 - **Stage 3** — `courses` 앱: `Course`/`CoursePlace`/`CourseProgress`. AI 추천·동선 최적화 연동은 별도 스테이지로 다시 분리 검토.
 - **Stage 4** — `reviews` + `interactions` 앱: `Review`/`ReviewHelpful`/`ReviewReport`, `Bookmark`.
 - **Stage 5** — `gamification` 앱: `RegionStamp`/`UserStamp`/`HiddenCourse`/`UserHiddenCourseUnlock`/`CompletionCard`.

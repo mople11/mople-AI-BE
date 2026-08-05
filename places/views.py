@@ -73,7 +73,7 @@ class SpotCongestionView(APIView):
     permission_classes = [AllowAny]
 
     @extend_schema(
-        summary="관광지 혼잡도", operation_id="places_congestion", tags=["Places"], auth=[],
+        summary="관광지 예상 방문 집중도", operation_id="places_congestion", tags=["Places"], auth=[],
         responses={200: CongestionResponse, 404: PlacesErrorResponseSerializer},
     )
     def get(self, request, place_id):
@@ -82,9 +82,10 @@ class SpotCongestionView(APIView):
             return ApiResponse(data={})
         return ApiResponse(data={
             "level": congestion.level,
+            "concentrationRate": congestion.concentration_rate,
+            "forecastDate": congestion.forecast_date,
             "parkingAvailable": spot.parking_available,
-            "hourlyGraph": congestion.hourly_graph,
-            "recommendedTime": congestion.recommended_time,
+            "recommendedDate": congestion.recommended_date,
         })
 
 

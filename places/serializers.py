@@ -73,10 +73,10 @@ class SpotDetailSerializer(serializers.ModelSerializer):
     def get_map(self, obj) -> dict:
         return {"lat": float(obj.latitude), "lng": float(obj.longitude)}
 
-    @extend_schema_field(OpenApiTypes.FLOAT)
-    def get_distanceFromUser(self, obj) -> float | None:
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_distanceFromUser(self, obj) -> str | None:
         distance = self.context.get("distance")
-        return round(distance, 1) if distance is not None else None
+        return f"{round(distance, 1)}km" if distance is not None else None
 
     @extend_schema_field({"type": "object"})
     def get_reviewSummary(self, obj) -> dict:

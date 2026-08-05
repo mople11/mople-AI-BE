@@ -26,7 +26,7 @@ def test_detail_success_with_distance(mock_detail, api_client):
     assert response.status_code == 200
     data = response.data["data"]
     assert data["map"] == {"lat": 34.885, "lng": 127.509}
-    assert isinstance(data["distanceFromUser"], float)
+    assert data["distanceFromUser"] == "13.7km"
     assert data["reviewSummary"] == {"avgRating": 0, "aiSatisfaction": None}
     assert data["category"] == "관광지"
 

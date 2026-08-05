@@ -568,8 +568,8 @@ Notion 페이지: 설정, 온보딩
 | 기능 | 외부 API | 비고 |
 |---|---|---|
 | 통합 검색 / 장소 상세 | 한국관광공사 TourAPI | 실시간 호출 + 로컬 write-through 캐시(아래 근거 참고) |
-| 관광지 혼잡도 | SK 혼잡도 API | **이번 스테이지는 mock 클라이언트만 구현**. 정확한 서비스명·엔드포인트·인증 방식이 아직 확인되지 않았다 — 임의로 단정하지 않는다(0절 원칙 2). 실제 연동은 후속 작업 |
-| 실시간 교통 혼잡 안내 | 카카오모빌리티 길찾기 API | Notion 원문은 "한국도로공사 실시간 교통 데이터 연동 지점"이라고 되어 있으나, 이슈 #12 결정에 따라 카카오모빌리티로 **정정**한다. 마찬가지로 **이번 스테이지는 mock만 구현**, 실제 연동은 후속 작업 |
+| 관광지 예상 방문 집중도 | 한국관광공사 관광지 집중률 방문자 추이 예측 API | KT 이동통신 데이터 기반 향후 30일 집중률을 사용한다. 실시간·시간대별 데이터가 아니므로 API와 화면에서 "예상 방문 집중도"로 명시한다. |
+| 실시간 교통 혼잡 안내 | 카카오모빌리티 길찾기 API | 경로별 예상 시간, 도로별 교통 상태와 대안 경로를 사용한다. Notion 원문의 "한국도로공사" 연동 지점은 카카오모빌리티로 정정한다. |
 
 **TourAPI는 write-through 캐시를 유지한다** (이전 버전 §7.11.1의 결정을 그대로 승계):
 
@@ -577,7 +577,7 @@ Notion 페이지: 설정, 온보딩
 2. "실시간 연동"은 사전 대량 시딩을 하지 않고 조회 시점에 최신 데이터를 반영한다는 뜻으로 해석하며, 로컬 저장 자체를 금지하지 않는다.
 3. 검색/상세 모두 매 요청마다 TourAPI를 호출해 항상 최신 데이터를 보여주고, 로컬 테이블은 "이미 조회된 장소의 안정적 앵커" 역할만 한다.
 
-**SK 혼잡도 / 카카오모빌리티는 로컬 캐시를 두지 않는다.** 혼잡도·교통 데이터는 성격상 매우 빠르게 바뀌고, Notion 응답 계약도 매 요청 실시간 값을 전제로 한다(`hourlyGraph`, `etaMin` 등). 이번 스테이지는 두 클라이언트를 mock으로 구현하므로 캐시 여부 자체가 의미가 없고, 실제 연동 시점에 다시 검토한다.
+**관광지 집중률 / 카카오모빌리티는 로컬 캐시를 두지 않는다.** 집중률 예측과 교통 데이터는 외부 API의 최신 응답을 사용한다. 외부 데이터가 없거나 호출에 실패하면 기존 계약대로 HTTP 200과 빈 `data`를 반환한다.
 
 #### 7.11.2 모델
 
@@ -617,12 +617,13 @@ Notion 페이지: 설정, 온보딩
   - 메서드: `search_spots(*, keyword=None, category=None, sigungu=None) -> list[RawSpot]`, `get_spot_detail(*, content_id: str) -> RawSpot | None`(공통정보+소개정보(`detailIntro2`, 주차장 필드 파싱 포함)+이미지정보 조합).
   - 정확한 엔드포인트·파라미터·응답 필드명은 이 문서에서 확정하지 않는다 — 공식 문서로 최종 확인 후 이 어댑터 안에만 캡슐화한다. 조회 범위는 전남(area code) 한정.
   - 호출 실패(타임아웃·5xx·파싱 오류)는 `TourApiError`를 던지고, 서비스 계층에서 `ApiError(ErrorCode.EXTERNAL_API_ERROR)`로 변환(7.11.4).
-- **`places/sk_congestion.py` — `SkCongestionClient`** (mock 전용, 이번 스테이지)
-  - 메서드: `get_congestion(*, content_id: str) -> CongestionData | None`.
-  - 실제 서비스명·엔드포인트·인증 방식이 확정되지 않아 **이번 스테이지는 항상 `None`을 반환하는 mock 구현**으로 둔다(=실제 연동 전까지 관광지 혼잡도 응답은 항상 `CONGESTION_DATA_UNAVAILABLE`). 실제 키 발급 후 이 파일 내부만 교체하면 되도록 인터페이스를 지금 확정한다.
-- **`places/kakao_mobility.py` — `KakaoMobilityClient`** (mock 전용, 이번 스테이지)
+- **`places/tourist_congestion.py` — `TouristCongestionClient`**
+  - 한국관광공사 `TatsCnctrRateService/tatsCnctrRatedList`를 호출한다.
+  - 관광지명과 전남 시군구 법정동 코드를 전달하고, 첫 날짜의 집중률과 향후 30일 중 집중률이 가장 낮은 추천일을 반환한다.
+  - 집중률은 34 미만 `여유`, 67 미만 `보통`, 그 이상 `혼잡`으로 변환한다.
+- **`places/kakao_mobility.py` — `KakaoMobilityClient`**
   - 메서드: `get_traffic(*, origin: tuple[float, float], destination: tuple[float, float]) -> TrafficData | None`.
-  - 마찬가지로 이번 스테이지는 항상 `None` 반환(=`TRAFFIC_DATA_UNAVAILABLE`). 실제 연동은 후속.
+  - 카카오모빌리티 Directions API를 호출해 기본 경로의 도로별 교통 상태와 ETA, 대안 경로 ETA를 반환한다.
 
 #### 7.11.4 에러 코드
 
@@ -631,7 +632,7 @@ Notion 페이지: 설정, 온보딩
 | `EXTERNAL_API_ERROR` | 502 | 외부 정보를 불러오지 못했습니다. | TourAPI 호출 타임아웃/5xx/응답 파싱 실패(검색·상세에만 해당) |
 | `PLACE_NOT_FOUND` | 404 | 장소 정보를 찾을 수 없습니다. | 장소 상세·관광지 혼잡도 조회 시 로컬 `placeId`가 없거나, 상세의 경우 TourAPI에 해당 `content_id`가 더 이상 존재하지 않음 |
 
-**`CONGESTION_DATA_UNAVAILABLE`, `TRAFFIC_DATA_UNAVAILABLE`은 `ApiError`로 만들지 않는다.** 이슈 #12 지시대로 둘 다 HTTP 200 + 빈 `data`로 응답해야 하는 "정상 케이스"이므로, `common/exceptions.py`의 예외 체계에 넣지 않고 뷰에서 직접 `ApiResponse(data={})`(또는 상태 표시 필드 포함)로 처리한다. `SkCongestionClient`/`KakaoMobilityClient`가 `None`을 반환하면 이 경로를 탄다 — 이번 스테이지는 mock이 항상 `None`이므로 두 엔드포인트는 사실상 항상 이 응답을 낸다.
+**`CONGESTION_DATA_UNAVAILABLE`, `TRAFFIC_DATA_UNAVAILABLE`은 `ApiError`로 만들지 않는다.** 둘 다 HTTP 200 + 빈 `data`로 응답해야 하는 정상 케이스이므로, 클라이언트가 `None`을 반환하면 뷰에서 `ApiResponse(data={})`로 처리한다.
 
 #### 7.11.5 서비스 계층 (`places/services.py`)
 
@@ -646,7 +647,7 @@ Notion 페이지: 설정, 온보딩
   4. `user_lat`/`user_lng`가 모두 주어지면 `calculate_distance_km`로 계산, 아니면 `None`.
 - `get_congestion(*, place_id: int) -> tuple[TouristSpot, CongestionData | None]`
   1. 로컬 `TouristSpot`을 `place_id`로 조회(없으면 `PLACE_NOT_FOUND` — 장소 자체가 없는 것과 "혼잡도 데이터가 없는 것"은 다른 케이스로 구분).
-  2. `SkCongestionClient.get_congestion(content_id=...)` 호출. 결과와 `TouristSpot.parking_available`을 뷰에서 조합해 응답을 만든다(`parkingAvailable`은 SK 응답이 아니라 로컬 TourAPI 캐시값에서 채운다 — 이슈 #12 완료조건).
+  2. `TouristCongestionClient.get_forecast(spot_name=..., sigungu=...)` 호출. 결과와 `TouristSpot.parking_available`을 뷰에서 조합한다. `parkingAvailable`은 집중률 API가 아니라 로컬 TourAPI 캐시값에서 채운다.
 - `get_traffic_congestion(*, origin, destination) -> TrafficData | None`
   - 좌표 자체를 다루므로 로컬 장소 조회가 필요 없다. `KakaoMobilityClient.get_traffic(...)`을 그대로 호출.
 - `calculate_distance_km(lat1, lng1, lat2, lng2) -> float` — haversine 공식.
@@ -685,14 +686,14 @@ Notion 페이지: 설정, 온보딩
     "hours": "...",
     "images": ["https://...", "https://..."],
     "map": { "lat": 34.8, "lng": 126.4 },
-    "distanceFromUser": 12.3,
+    "distanceFromUser": "12.3km",
     "reviewSummary": { "avgRating": 0, "aiSatisfaction": null }
   },
   "error": null
 }
 ```
 
-`distanceFromUser`는 Notion 문서엔 타입이 `"string"`으로 적혀 있지만, "lat/lng 있을 때 계산, 없으면 null"이라는 이슈 #12 요구와 맞물려 실제로는 숫자(km)로 구현한다 — 이 타입 표기는 Notion 문서 전반의 placeholder 관행으로 보고 숫자로 확정하되, 프론트와 최종 확인이 필요하다(7.11.8). `reviewSummary`는 `reviews` 앱(Stage 4) 전까지 `avgRating: 0`, `aiSatisfaction: null` 고정값.
+`distanceFromUser`는 Notion 명세 타입(`"string"`)에 맞춰 `"{km}km"` 형식의 문자열로 반환한다(예: `"12.3km"`). lat/lng 쿼리가 없으면 `null`. `reviewSummary`는 `reviews` 앱(Stage 4) 전까지 `avgRating: 0`, `aiSatisfaction: null` 고정값.
 
 **`GET /api/v1/places/{placeId}/congestion`**
 
@@ -700,16 +701,17 @@ Notion 페이지: 설정, 온보딩
 {
   "success": true,
   "data": {
-    "level": "여유",
+    "level": "보통",
+    "concentrationRate": 57.2,
+    "forecastDate": "2026-08-05",
     "parkingAvailable": true,
-    "hourlyGraph": [{ "hour": 0, "level": "여유" }],
-    "recommendedTime": "..."
+    "recommendedDate": "2026-08-10"
   },
   "error": null
 }
 ```
 
-`SkCongestionClient`가 `None`을 반환하면(이번 스테이지는 항상 그렇다) `CONGESTION_DATA_UNAVAILABLE`로 `{"success": true, "data": {}, "error": null}` 응답.
+`TouristCongestionClient`가 일치하는 관광지 예측 데이터를 찾지 못하거나 호출에 실패하면 `{"success": true, "data": {}, "error": null}`로 응답한다.
 
 **`GET /api/v1/traffic/congestion`** — query: `origin.lat`, `origin.lng`, `destination.lat`, `destination.lng`
 
@@ -729,7 +731,7 @@ Notion 페이지: 설정, 온보딩
 
 #### 7.11.7 테스트 관점 (`tests/test_places_search.py`, `tests/test_places_detail.py`, `tests/test_places_congestion.py`, `tests/test_traffic_congestion.py`)
 
-`TourApiClient`/`SkCongestionClient`/`KakaoMobilityClient` 전부 `unittest.mock.patch`로 모킹, 실제 네트워크 호출 없음.
+`TourApiClient`/`TouristCongestionClient`/`KakaoMobilityClient`는 테스트에서 `unittest.mock.patch`로 HTTP 호출을 모킹한다.
 
 - 검색 성공: mock 2건 반환 → `id`/`name`/`category`/`location`/`thumbnail` 존재, `rating: 0`, `TouristSpot` upsert 확인.
 - 검색 결과 없음: `results: []`.
@@ -738,24 +740,23 @@ Notion 페이지: 설정, 온보딩
 - 상세 조회 — 존재하지 않는 `placeId`: `PLACE_NOT_FOUND`, 404.
 - 상세 조회 — 로컬엔 있지만 TourAPI가 더 이상 `content_id`를 반환 안 함(mock `None`): `PLACE_NOT_FOUND`, 404.
 - 혼잡도 — 존재하지 않는 `placeId`: `PLACE_NOT_FOUND`, 404.
-- 혼잡도 — `placeId`는 있지만 `SkCongestionClient`가 `None`(이번 스테이지 기본 동작): 200 + `data: {}`.
-- 혼잡도 — `parkingAvailable`이 로컬 `TouristSpot.parking_available`에서 채워지는지(SK mock과 무관하게).
+- 집중률 — 예측 데이터가 없을 때 200 + `data: {}`.
+- 집중률 — 현재 집중률, 기준일, 추천 방문일을 파싱하고 `parkingAvailable`을 로컬 `TouristSpot.parking_available`에서 채우는지 확인.
 - 교통 — `KakaoMobilityClient`가 `None`(기본 동작): 200 + `data: {}`.
 
 #### 7.11.8 미해결 사항 / 후속 작업
 
-1. **SK 혼잡도 API 실제 서비스명·엔드포인트·인증 방식 미확정.** 이번 스테이지는 mock만 구현. 실제 계약/키 확보 후 `places/sk_congestion.py` 내부만 교체한다.
-2. **카카오모빌리티 실제 키 미발급.** 마찬가지로 mock만 구현. 이슈 #12 완료조건에 "실제 키 발급 후 통합 스모크 테스트"가 후속 작업으로 명시돼 있다.
+1. 관광지 집중률은 실시간 현장 인원이나 시간대별 대기시간이 아니라 향후 30일의 일별 예측값이다. 화면과 API에서 이를 실시간 혼잡도로 표현하지 않는다.
+2. 집중률 API 관광지명과 TourAPI 장소명이 일치하지 않는 장소는 빈 데이터로 처리하며, 운영 데이터 확인 후 별도 매핑 테이블 도입을 검토한다.
 3. `rating`(통합 검색), `reviewSummary.avgRating`/`aiSatisfaction`(장소 상세)은 `reviews`/`interactions` 앱(Stage 4) 완료 전까지 고정값(`0`/`null`)으로 응답한다. Stage 4 완료 후 실제 집계값으로 교체한다.
-4. `sort` 쿼리 파라미터의 구체적 옵션과 통합 검색 페이지네이션은 Notion 명세에 없다 — 지금은 TourAPI 기본 정렬만 패스스루하고 페이지네이션은 노출하지 않는다. 프론트 요구사항 확인 후 별도 확정.
-5. `distanceFromUser`의 Notion 명세 타입(`"string"`)과 실제 구현(숫자)이 다르다 — 프론트와 재확인 필요.
-6. 캐시 TTL 만료·오래된 `TouristSpot`/`TouristSpotImage` 정리 배치는 도입하지 않는다. 트래픽이 늘어 TourAPI 호출량이 문제가 되면 재검토.
+4. `sort` 쿼리 파라미터는 Notion 명세에 구체적 옵션이 없다 — 현재는 값을 받기만 하고 실제 정렬에는 반영하지 않는다(TourAPI 기본 정렬 그대로 반환). 통합 검색 페이지네이션도 노출하지 않는다. 프론트 요구사항 확인 후 별도 확정.
+5. 캐시 TTL 만료·오래된 `TouristSpot`/`TouristSpotImage` 정리 배치는 도입하지 않는다. 트래픽이 늘어 TourAPI 호출량이 문제가 되면 재검토.
 
 ## 8. 단계별 구현 계획
 
 - **Stage 0** — Django 프로젝트 뼈대: `config/` 생성, MySQL 연결, 빈 상태로 `manage.py migrate`/`runserver` 동작 확인. 도메인 앱 없음.
 - **Stage 1** — `accounts` 앱: 6절 모델/엔드포인트 구현. `common` 앱의 응답 포맷/에러 핸들러도 이 단계에서 함께 구현 (auth가 이를 바로 사용하므로).
-- **Stage 2** — `places` 앱: `TouristSpot`/`TouristSpotImage` 모델과 통합 검색(`/search`)/장소 상세/관광지 혼잡도/실시간 교통 혼잡 안내 4개 API(상세 설계는 7.11, GitHub 이슈 #12 기준). TourAPI는 실시간 연동 + 로컬 write-through 캐시, SK 혼잡도·카카오모빌리티는 이번 스테이지 mock으로만 구현하고 실제 연동은 후속 작업.
+- **Stage 2** — `places` 앱: `TouristSpot`/`TouristSpotImage` 모델과 통합 검색(`/search`)/장소 상세/관광지 예상 방문 집중도/실시간 교통 혼잡 안내 4개 API. TourAPI는 조회 시 로컬 write-through 캐시, 집중률은 관광공사 예측 API, 교통은 카카오모빌리티 Directions API를 사용한다.
 - **Stage 3** — `courses` 앱: `Course`/`CoursePlace`/`CourseProgress`. AI 추천·동선 최적화 연동은 별도 스테이지로 다시 분리 검토.
 - **Stage 4** — `reviews` + `interactions` 앱: `Review`/`ReviewHelpful`/`ReviewReport`, `Bookmark`.
 - **Stage 5** — `gamification` 앱: `RegionStamp`/`UserStamp`/`HiddenCourse`/`UserHiddenCourseUnlock`/`CompletionCard`.

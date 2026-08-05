@@ -4,7 +4,7 @@ import pytest
 from django.utils import timezone
 
 from places.models import TouristSpot
-from places.sk_congestion import CongestionData
+from places.tourist_congestion import CongestionForecast
 
 
 def create_spot(**overrides):
@@ -25,7 +25,7 @@ def test_congestion_missing_spot(api_client):
 
 
 @pytest.mark.django_db
-@patch("places.services.SkCongestionClient.get_congestion", return_value=None)
+@patch("places.services.TouristCongestionClient.get_forecast", return_value=None)
 def test_congestion_unavailable_returns_empty_data(mock_congestion, api_client):
     spot = create_spot()
     response = api_client.get(f"/api/v1/places/{spot.id}/congestion")
@@ -34,10 +34,24 @@ def test_congestion_unavailable_returns_empty_data(mock_congestion, api_client):
 
 
 @pytest.mark.django_db
-@patch("places.services.SkCongestionClient.get_congestion")
+@patch("places.services.TouristCongestionClient.get_forecast")
 def test_congestion_uses_local_parking_value(mock_congestion, api_client):
-    spot = create_spot(parking_available=True)
-    mock_congestion.return_value = CongestionData(level="여유", hourly_graph=[{"hour": 0, "level": "여유"}], recommended_time="오전 9시")
+    spot = create_spot(parking_available=True, sigungu="순천시")
+    mock_congestion.return_value = CongestionForecast(
+        level="보통",
+        concentration_rate=57.2,
+        forecast_date="2026-08-05",
+        recommended_date="2026-08-10",
+    )
     response = api_client.get(f"/api/v1/places/{spot.id}/congestion")
     assert response.status_code == 200
-    assert response.data["data"] == {"level": "여유", "parkingAvailable": True, "hourlyGraph": [{"hour": 0, "level": "여유"}], "recommendedTime": "오전 9시"}
+    assert response.data["data"] == {
+        "level": "보통",
+        "concentrationRate": 57.2,
+        "forecastDate": "2026-08-05",
+        "parkingAvailable": True,
+        "recommendedDate": "2026-08-10",
+    }
+    mock_congestion.assert_called_once_with(
+        spot_name="기존 장소", sigungu="순천시"
+    )

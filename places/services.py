@@ -6,8 +6,8 @@ from django.utils import timezone
 from common.exceptions import ApiError, ErrorCode
 from places.kakao_mobility import KakaoMobilityClient
 from places.models import TouristSpot, TouristSpotImage
-from places.sk_congestion import SkCongestionClient
 from places.tourapi import RawSpot, TourApiClient, TourApiError
+from places.tourist_congestion import TouristCongestionClient
 
 
 def _upsert_spot(raw: RawSpot, *, all_images=False):
@@ -70,7 +70,10 @@ def get_congestion(*, place_id):
         spot = TouristSpot.objects.get(pk=place_id)
     except TouristSpot.DoesNotExist as exc:
         raise ApiError(ErrorCode.PLACE_NOT_FOUND) from exc
-    return spot, SkCongestionClient().get_congestion(content_id=spot.content_id)
+    return spot, TouristCongestionClient().get_forecast(
+        spot_name=spot.name,
+        sigungu=spot.sigungu,
+    )
 
 
 def get_traffic_congestion(*, origin, destination):
@@ -82,4 +85,3 @@ def calculate_distance_km(lat1, lng1, lat2, lng2):
     delta_lat, delta_lng = lat2 - lat1, lng2 - lng1
     value = sin(delta_lat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(delta_lng / 2) ** 2
     return 6371.0088 * 2 * asin(sqrt(value))
-

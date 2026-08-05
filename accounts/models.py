@@ -3,9 +3,25 @@ from django.db import models
 
 
 class User(AbstractUser):
+    class Provider(models.TextChoices):
+        GOOGLE = "google", "Google"
+        KAKAO = "kakao", "Kakao"
+
     email = models.EmailField(unique=True)
     nickname = models.CharField(max_length=50)
     agreed_terms_at = models.DateTimeField(null=True, blank=True)
+    provider = models.CharField(
+        max_length=20, choices=Provider.choices, null=True, blank=True
+    )
+    provider_id = models.CharField(max_length=255, null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "provider_id"],
+                name="accounts_user_provider_provider_id_unique",
+            ),
+        ]
 
 
 class EmailVerificationCode(models.Model):

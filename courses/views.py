@@ -68,8 +68,8 @@ class CourseSaveView(APIView):
             404: CoursesErrorResponseSerializer,
         },
     )
-    def post(self, request, course_id):
-        save_course(user=request.user, course_id=course_id)
+    def post(self, request, courseId):
+        save_course(user=request.user, course_id=courseId)
         return ApiResponse(data={"saved": True})
 
 
@@ -87,8 +87,8 @@ class CourseStartView(APIView):
             404: CoursesErrorResponseSerializer,
         },
     )
-    def post(self, request, course_id):
-        progress = start_course(user=request.user, course_id=course_id)
+    def post(self, request, courseId):
+        progress = start_course(user=request.user, course_id=courseId)
         return ApiResponse(data={"startedAt": progress.started_at})
 
 
@@ -108,12 +108,12 @@ class CourseCompleteView(APIView):
             422: CoursesErrorResponseSerializer,
         },
     )
-    def post(self, request, course_id):
+    def post(self, request, courseId):
         serializer = CourseCompleteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         complete_course(
             user=request.user,
-            course_id=course_id,
+            course_id=courseId,
             check_in_locations=serializer.validated_data["checkInLocations"],
         )
         return ApiResponse(data={"completed": True, "cardId": None})
@@ -133,6 +133,6 @@ class CourseShareView(APIView):
             404: CoursesErrorResponseSerializer,
         },
     )
-    def post(self, request, course_id):
-        share_url = share_course(course_id=course_id)
+    def post(self, request, courseId):
+        share_url = share_course(course_id=courseId)
         return ApiResponse(data={"shareUrl": share_url})

@@ -56,3 +56,21 @@ def test_swagger_ui_is_available(api_client):
 
     assert response.status_code == 200
     assert b"swagger-ui" in response.content
+
+
+def test_openapi_uses_notion_path_parameter_names(api_client):
+    response = api_client.get(
+        reverse("schema"),
+        HTTP_ACCEPT="application/json",
+    )
+
+    assert response.status_code == 200
+    paths = response.json()["paths"]
+
+    assert "/api/v1/places/{placeId}" in paths
+    assert "/api/v1/places/{placeId}/congestion" in paths
+    for action in ("save", "start", "complete", "share"):
+        assert f"/api/v1/courses/{{courseId}}/{action}" in paths
+
+    assert not any("{place_id}" in path for path in paths)
+    assert not any("{course_id}" in path for path in paths)

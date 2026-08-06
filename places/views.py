@@ -59,12 +59,12 @@ class SpotDetailView(APIView):
         parameters=[SpotDetailQuerySerializer],
         responses={200: DetailResponse, 404: PlacesErrorResponseSerializer, 422: PlacesErrorResponseSerializer, 502: PlacesErrorResponseSerializer},
     )
-    def get(self, request, place_id):
+    def get(self, request, placeId):
         query = SpotDetailQuerySerializer(data=request.query_params)
         query.is_valid(raise_exception=True)
         values = query.validated_data
         spot, distance = get_spot_detail(
-            place_id=place_id, user_lat=values.get("latitude"), user_lng=values.get("longitude")
+            place_id=placeId, user_lat=values.get("latitude"), user_lng=values.get("longitude")
         )
         return ApiResponse(data=SpotDetailSerializer(spot, context={"distance": distance}).data)
 
@@ -76,8 +76,8 @@ class SpotCongestionView(APIView):
         summary="관광지 예상 방문 집중도", operation_id="places_congestion", tags=["Places"], auth=[],
         responses={200: CongestionResponse, 404: PlacesErrorResponseSerializer},
     )
-    def get(self, request, place_id):
-        spot, congestion = get_congestion(place_id=place_id)
+    def get(self, request, placeId):
+        spot, congestion = get_congestion(place_id=placeId)
         if congestion is None:
             return ApiResponse(data={})
         return ApiResponse(data={

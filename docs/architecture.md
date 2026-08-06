@@ -890,6 +890,171 @@ Notion 페이지: 설정, 온보딩
 4. `sort` 쿼리 파라미터는 Notion 명세에 구체적 옵션이 없다 — 현재는 값을 받기만 하고 실제 정렬에는 반영하지 않는다(TourAPI 기본 정렬 그대로 반환). 통합 검색 페이지네이션도 노출하지 않는다. 프론트 요구사항 확인 후 별도 확정.
 5. 캐시 TTL 만료·오래된 `TouristSpot`/`TouristSpotImage` 정리 배치는 도입하지 않는다. 트래픽이 늘어 TourAPI 호출량이 문제가 되면 재검토.
 
+### 7.12 `courses` 앱 상세 설계 (Stage 3-① 실행용, `feature/courses-base`)
+
+> GitHub 이슈 초안("[Feature] 추천 코스 저장 구조 + 상태 API 구현")과 Notion API spec DB "추천" 그룹의 코스 저장(`e6804d374d2783f3a7c0014db7badaf9`)·코스 시작(`1e304d374d2782c3957a81d1d32968cf`)·완주 인증(`56e04d374d2783ea9e3c81d0a400f879`)·코스 공유(`72104d374d27821e93198183646acb2f`) 4개 페이지, "데이터 모델링 (ERD)" 페이지의 `courses`/`course_places`/`user_courses` 테이블을 근거로 7.2절을 실행 가능한 수준까지 구체화한다. 이 브랜치에는 `Course`/`CoursePlace`를 만드는 공개 API가 없다 — AI 추천(Stage 3-②, `feature/courses-recommend`)과 동선 최적화(Stage 3-③, `feature/courses-optimize`)가 그 역할을 맡으므로, 이번 스테이지는 두 모델이 **이미 존재한다고 가정**하고 그 위에서 저장/시작/완주 인증/공유 4개 상태 전이 API만 구현한다. 테스트도 `Course`/`CoursePlace`를 ORM으로 직접 생성해 검증한다.
+
+#### 7.12.1 모델
+
+**`Course`** (7.2절 필드 + ERD `courses.status` 반영)
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `owner` | FK to `accounts.User`, null 허용, `on_delete=SET_NULL` | AI 자동 생성 코스는 소유자 없음. **이 필드는 "코스를 최초로 만든 사람"만 가리키고, 코스 저장(`save`) API가 이 값을 갱신하지 않는다** — 공유 링크로 들어온 다른 사용자가 저장/시작해도 `owner`는 그대로다. 여러 사용자의 개별 진행은 `CourseProgress`가 담당(7.12.3의 "다중 사용자" 메모). |
+| `name` | `CharField` | |
+| `duration_minutes` | `PositiveIntegerField`, null 허용 | AI 추천 결과로 채워짐(Stage 3-②), 이번 스테이지는 fixture 값 그대로 |
+| `distance_km` | `DecimalField`, null 허용 | 〃 |
+| `recommend_reason` | `TextField`, blank 허용 | 〃 |
+| `mood` / `companion_type` / `transport_type` | `CharField`, blank 허용 | AI 추천 입력값 기록용(Stage 3-②) |
+| `status` | `CharField`, choices `TEMP`/`SAVED`, default `TEMP` | ERD 기준 신규 추가. **`TEMP → SAVED` 단방향 승격만 한다** — 코스 저장 API가 호출되면 `SAVED`로 바뀌고 이후 절대 되돌아가지 않는다(다운그레이드 로직 없음). |
+
+**`CoursePlace`** (7.2절 그대로, 이번 스테이지에서 필드 추가 없음 — 동선 최적화 착수 시 ERD의 `estimated_arrival_time` 등 나머지 필드 도입 여부를 그때 재검토)
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `course` | FK to `Course`, `on_delete=CASCADE`, `related_name="places"` | |
+| `place` | FK to `places.TouristSpot`, `on_delete=CASCADE` | |
+| `order` | `PositiveSmallIntegerField` | 방문 순서 |
+| `travel_time_from_prev` | `PositiveIntegerField`, null 허용 | 분 단위, 카카오 로컬 API 결과 캐시. Stage 3-③ 전까지 항상 `None` |
+
+`Meta.constraints = [UniqueConstraint(fields=["course", "order"])]` — ERD `visit_order UNIQUE with course_id` 반영.
+
+**`CourseProgress`**
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `user` | FK to `accounts.User`, `on_delete=CASCADE`, `related_name="course_progresses"` | |
+| `course` | FK to `Course`, `on_delete=CASCADE`, `related_name="progresses"` | |
+| `status` | `CharField`, choices `SAVED`/`IN_PROGRESS`/`COMPLETED` | ERD `user_courses.status` |
+| `started_at` | `DateTimeField`, null 허용 | `start` 호출 시각 |
+| `completed_at` | `DateTimeField`, null 허용 | `complete` 성공 시각 |
+| `created_at` / `updated_at` | `DateTimeField`(`auto_now_add`/`auto_now`) | |
+
+`Meta.constraints = [UniqueConstraint(fields=["user", "course"])]` — ERD `user_courses` UNIQUE(user_id, course_id). 사용자 1명당 코스 1개에 진행 기록은 1건뿐이며, "다시 시작"도 같은 행을 갱신한다(7.12.3).
+
+#### 7.12.2 에러 코드 (`common/exceptions.py` 추가)
+
+| 코드 | 상태코드 | 메시지 | 발생 조건 |
+|---|---|---|---|
+| `COURSE_NOT_FOUND` | 404 | 존재하지 않는 코스입니다. | 4개 엔드포인트 전부 — path의 `courseId`로 `Course`를 찾을 수 없음 |
+| `LOCATION_MISMATCH` | 400 | 코스 경로와 위치가 일치하지 않습니다. | 완주 인증 시 `checkInLocations` 개수 불일치 또는 반경 이탈 |
+
+#### 7.12.3 서비스 계층 (`courses/services.py`)
+
+공통 헬퍼: `_get_course(course_id) -> Course` — `Course.objects.get(pk=course_id)`, `DoesNotExist`는 `ApiError(ErrorCode.COURSE_NOT_FOUND)`로 변환. 4개 서비스 함수 전부 이 헬퍼로 시작한다.
+
+**`save_course(*, user, course_id) -> Course`**
+1. `course = _get_course(course_id)`
+2. `course.status = Course.Status.SAVED`로 갱신·저장(이미 `SAVED`여도 그대로 — 멱등).
+3. `CourseProgress.objects.update_or_create(user=user, course=course, defaults={"status": CourseProgress.Status.SAVED})`
+4. `course` 반환.
+
+**`start_course(*, user, course_id) -> CourseProgress`**
+1. `course = _get_course(course_id)`
+2. `CourseProgress.objects.update_or_create(user=user, course=course, defaults={"status": CourseProgress.Status.IN_PROGRESS, "started_at": timezone.now()})` — `save` 선행 여부와 무관하게 항상 성공(Notion 계약에 "먼저 저장해야 함" 같은 전제·에러코드가 없다).
+3. 반환.
+
+**상태 upsert 규칙에 대한 결정 — 의도적으로 단순하게 간다.** `save`/`start`/`complete`는 각자 맡은 상태값을 **조건 없이** `update_or_create`로 덮어쓴다. 예를 들어 이미 `COMPLETED`인 코스에 `save`를 다시 호출하면 `CourseProgress.status`는 `SAVED`로 되돌아간다. "진행 상태는 앞으로만 간다" 같은 상태 머신 가드는 이슈 완료 조건 어디에도 없고 Notion 계약도 4개 엔드포인트를 서로 독립적인 단발 액션으로만 정의하므로, 요구되지 않은 보호 로직을 임의로 추가하지 않았다(0절 원칙 2). 실제 운영 중 "완주한 코스를 재저장하면 진행 상태가 사라지는" 문제가 관측되면 별도 이슈로 상태 머신 가드를 추가한다(7.12.8-①).
+
+**`complete_course(*, user, course_id, check_in_locations) -> CourseProgress`** — 이 브랜치의 핵심 로직.
+1. `course = _get_course(course_id)`
+2. `course_places = list(CoursePlace.objects.filter(course=course).order_by("order"))`
+3. **개수 검증**: `len(check_in_locations) != len(course_places)`면 `ApiError(LOCATION_MISMATCH)`.
+4. **반경 검증**: `zip(check_in_locations, course_places)`으로 순서대로 짝지어, 각 쌍마다 `places.services.calculate_distance_km(loc.lat, loc.lng, cp.place.latitude, cp.place.longitude) * 1000`(km→m 환산)이 `settings.COURSE_CHECKIN_RADIUS_M`을 초과하면 `ApiError(LOCATION_MISMATCH)`. 하나라도 실패하면 즉시 예외를 던지고 `CourseProgress`는 건드리지 않는다(부분 갱신 없음).
+5. 전부 통과하면 `CourseProgress.objects.update_or_create(user=user, course=course, defaults={"status": CourseProgress.Status.COMPLETED, "completed_at": timezone.now()})`.
+6. 반환. `cardId`는 서비스가 아니라 뷰/시리얼라이저에서 항상 `None`으로 고정한다(Stage 5의 `CompletionCard` 완료 전까지).
+
+체크인 지점과 코스 장소의 매칭은 **`order` 순서 기반 1:1 페어링**으로 확정한다 — Notion 요청 스펙이 `checkInLocations`를 순서 있는 배열로만 정의하고 각 지점이 어느 장소용인지 별도 식별자를 주지 않으므로, "사용자가 코스 순서대로 방문하며 그 순서대로 체크인한다"는 유일하게 검증 가능한 해석을 택했다(7.12.8-④). 반경 계산은 `places/services.py`의 `calculate_distance_km`(haversine, km 단위)를 그대로 재사용해 m로 환산 비교한다 — 새 거리 계산 로직을 만들지 않는다.
+
+**`share_course(*, course_id) -> str`**
+1. `course = _get_course(course_id)`
+2. `f"{settings.COURSE_SHARE_BASE_URL}/{course.id}"` 반환. 요청한 사용자 정보는 URL에 넣지 않는다 — Notion 응답이 `shareUrl` 문자열 하나뿐이고, 공유 링크를 연 다른 사용자가 그 코스를 독립적으로 저장/시작할 수 있어야 하므로 사용자 종속 값을 넣을 이유가 없다.
+
+#### 7.12.4 엔드포인트
+
+4개 전부 `permission_classes = [IsAuthenticated]`(Notion `authorization: required`), `POST`, path param `courseId`(int, 로컬 PK).
+
+**`POST /api/v1/courses/{courseId}/save`** — 요청 본문 없음
+
+```json
+{ "success": true, "data": { "saved": true }, "error": null }
+```
+
+**`POST /api/v1/courses/{courseId}/start`** — 요청 본문 없음
+
+```json
+{ "success": true, "data": { "startedAt": "2026-08-06T10:00:00Z" }, "error": null }
+```
+
+**`POST /api/v1/courses/{courseId}/complete`**
+
+```json
+{ "checkInLocations": [{ "lat": 34.8, "lng": 126.4 }, { "lat": 34.81, "lng": 126.42 }] }
+```
+
+```json
+{ "success": true, "data": { "completed": true, "cardId": null }, "error": null }
+```
+
+검증 실패 시 `LOCATION_MISMATCH`(400). `checkInLocations`는 `allow_empty=False`(빈 배열은 개수 불일치 판정 이전에 시리얼라이저 검증에서 422로 걸러진다), 각 원소는 `lat`(-90~90)/`lng`(-180~180) 범위 검증(`places`의 쿼리 시리얼라이저와 동일한 방식).
+
+**`POST /api/v1/courses/{courseId}/share`** — 요청 본문 없음
+
+```json
+{ "success": true, "data": { "shareUrl": "https://eodiganam.app/courses/1" }, "error": null }
+```
+
+4개 전부 `courseId`가 존재하지 않으면 `COURSE_NOT_FOUND`(404).
+
+#### 7.12.5 URL 등록
+
+`places`와 달리 4개 엔드포인트가 전부 `/courses/{courseId}/...` 아래 있으므로 `accounts`와 같은 방식(prefix `include`)을 쓴다.
+
+`config/urls.py`에 `path("api/v1/courses/", include("courses.urls"))` 추가.
+
+`courses/urls.py`:
+
+```python
+urlpatterns = [
+    path("<int:course_id>/save", CourseSaveView.as_view(), name="save"),
+    path("<int:course_id>/start", CourseStartView.as_view(), name="start"),
+    path("<int:course_id>/complete", CourseCompleteView.as_view(), name="complete"),
+    path("<int:course_id>/share", CourseShareView.as_view(), name="share"),
+]
+```
+
+#### 7.12.6 환경 변수 (`.env.example` 추가)
+
+| 변수 | 기본값 | 비고 |
+|---|---|---|
+| `COURSE_CHECKIN_RADIUS_M` | `200` | 완주 인증 반경 임계값(미터). 운영 데이터 확인 후 조정 |
+| `COURSE_SHARE_BASE_URL` | `https://eodiganam.app/courses` | **placeholder** — 실제 프론트엔드 배포 도메인이 정해지면 교체(7.12.8-②) |
+
+`config/settings.py`에 `COURSE_CHECKIN_RADIUS_M=(int, 200)` 타입 캐스팅을 `environ.Env(...)` 초기화 인자에 등록하고, `COURSE_SHARE_BASE_URL`은 문자열 그대로 읽는다.
+
+#### 7.12.7 테스트 관점 (`tests/test_courses.py`, 신규)
+
+`Course`/`CoursePlace`는 공개 API가 없으므로 테스트에서 직접 ORM으로 생성한다(`TouristSpot` 2~3개 + `CoursePlace(order=0/1/2)`).
+
+- 저장 — 성공: `Course.status == SAVED`, `CourseProgress(user, course).status == SAVED` 생성 확인.
+- 저장 — 존재하지 않는 `courseId`: `COURSE_NOT_FOUND`, 404.
+- 시작 — 성공: `CourseProgress.status == IN_PROGRESS`, `started_at` not null, 응답 `startedAt`이 그 값과 일치.
+- 시작 — 존재하지 않는 `courseId`: `COURSE_NOT_FOUND`, 404.
+- 완주 인증 — 성공: 코스 장소 좌표와 동일(또는 반경 이내)한 `checkInLocations` → `COMPLETED` + `completed_at` 설정, 응답 `completed: true, cardId: null`.
+- 완주 인증 — 반경 밖: 장소 좌표에서 `COURSE_CHECKIN_RADIUS_M`보다 먼 좌표를 하나라도 포함 → `LOCATION_MISMATCH`, 400, `CourseProgress` 상태는 호출 전과 동일하게 유지.
+- 완주 인증 — 개수 불일치: 코스 장소가 3개인데 `checkInLocations`는 2개 → `LOCATION_MISMATCH`, 400.
+- 완주 인증 — 존재하지 않는 `courseId`: `COURSE_NOT_FOUND`, 404.
+- 공유 — 성공: `shareUrl`에 `courseId`가 포함되는지 확인.
+- 공유 — 존재하지 않는 `courseId`: `COURSE_NOT_FOUND`, 404.
+- 인증 — 4개 중 최소 1개는 토큰 없이 호출 시 401(`IsAuthenticated` 배선 확인용 — 나머지 3개까지 반복 검증할 필요는 없음).
+
+#### 7.12.8 미해결 사항 / 후속 작업
+
+1. **상태 되돌림 미보호**: 7.12.3에서 서술한 대로 `save`/`start`/`complete`는 서로의 상태를 덮어쓸 수 있다(예: 완주 후 재저장하면 `SAVED`로 후퇴). 프론트엔드가 실제로 이 3개 호출을 어떤 순서로 쓰는지 확인한 뒤 필요하면 상태 머신 가드를 추가한다.
+2. **`COURSE_SHARE_BASE_URL`은 placeholder다.** 실제 프론트엔드 도메인이 정해지면 값을 교체해야 한다 — 지금은 "유효한 URL 형식의 문자열을 반환한다"는 계약만 만족시킨다.
+3. **`Course.owner`가 여러 사용자의 저장/시작을 어떻게 다루는지는 이번 스테이지에서 실사용 검증이 안 된다** — `Course`를 만드는 공개 API(Stage 3-②/③)가 아직 없어서 "한 코스를 여러 사용자가 공유해 각자 저장"하는 흐름은 fixture로만 테스트한다. Stage 3-② 착수 시 실제 흐름으로 재검증이 필요하다.
+4. 완주 인증의 순서 기반 1:1 페어링(7.12.3)은 Notion 계약상 유일하게 검증 가능한 해석이지만, 프론트엔드가 실제로 장소별 `placeId`를 체크인 요청에 함께 보낼 수 있다면(계약 확장) 순서 대신 명시적 매칭으로 바꾸는 게 더 안전하다 — 프론트 연동 시점에 재확인.
+
 ## 8. 단계별 구현 계획
 
 - **Stage 0** — Django 프로젝트 뼈대: `config/` 생성, MySQL 연결, 빈 상태로 `manage.py migrate`/`runserver` 동작 확인. 도메인 앱 없음.

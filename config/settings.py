@@ -15,6 +15,7 @@ env = environ.Env(
     TOUR_API_TIMEOUT_SEC=(int, 5),
     TOUR_CONGESTION_API_TIMEOUT_SEC=(int, 5),
     KAKAO_MOBILITY_TIMEOUT_SEC=(int, 5),
+    COURSE_CHECKIN_RADIUS_M=(int, 200),
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
@@ -36,6 +37,7 @@ INSTALLED_APPS = [
     "common",
     "accounts",
     "places",
+    "courses",
 ]
 
 MIDDLEWARE = [
@@ -168,3 +170,9 @@ KAKAO_MOBILITY_REST_API_KEY = env(
     "KAKAO_MOBILITY_REST_API_KEY", default=""
 )
 KAKAO_MOBILITY_TIMEOUT_SEC = env("KAKAO_MOBILITY_TIMEOUT_SEC")
+
+COURSE_CHECKIN_RADIUS_M = env("COURSE_CHECKIN_RADIUS_M")
+COURSE_SHARE_BASE_URL = env(
+    "COURSE_SHARE_BASE_URL",
+    default="https://eodiganam.app/courses",
+)

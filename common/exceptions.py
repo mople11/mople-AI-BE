@@ -50,6 +50,16 @@ class ErrorCode(Enum):
         404,
         "장소 정보를 찾을 수 없습니다.",
     )
+    COURSE_NOT_FOUND = (
+        "COURSE_NOT_FOUND",
+        404,
+        "존재하지 않는 코스입니다.",
+    )
+    LOCATION_MISMATCH = (
+        "LOCATION_MISMATCH",
+        400,
+        "코스 경로와 위치가 일치하지 않습니다.",
+    )
 
     def __init__(self, code: str, status_code: int, message: str):
         self.code = code

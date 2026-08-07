@@ -5,7 +5,7 @@ import pytest
 from django.utils import timezone
 
 from places.models import TouristSpot
-from places.tourapi import RawSpot
+from places.tourapi import RawSpot, TourApiClient
 
 
 def create_spot(**overrides):
@@ -54,3 +54,39 @@ def test_detail_removed_from_tourapi(mock_detail, api_client):
     assert response.status_code == 404
     assert response.data["error"]["code"] == "PLACE_NOT_FOUND"
 
+
+def test_tourapi_detail_common_uses_current_parameters():
+    common_item = {
+        "contentid": "100",
+        "contenttypeid": "12",
+        "title": "순천만 국가정원",
+        "addr1": "전라남도 순천시",
+        "mapy": "34.885",
+        "mapx": "127.509",
+    }
+    client = TourApiClient()
+
+    with patch.object(
+        client,
+        "_get_items",
+        side_effect=[[common_item], [], []],
+    ) as get_items:
+        client.get_spot_detail(content_id="100")
+
+    endpoint, params = get_items.call_args_list[0].args
+    assert endpoint == "detailCommon2"
+    assert params["contentId"] == "100"
+    assert not {
+        "defaultYN",
+        "firstImageYN",
+        "areacodeYN",
+        "catcodeYN",
+        "addrinfoYN",
+        "mapinfoYN",
+        "overviewYN",
+    } & params.keys()
+
+    image_endpoint, image_params = get_items.call_args_list[2].args
+    assert image_endpoint == "detailImage2"
+    assert image_params["contentId"] == "100"
+    assert "subImageYN" not in image_params

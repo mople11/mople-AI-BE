@@ -5,6 +5,8 @@ from rest_framework.views import APIView
 
 from common.response import ApiResponse
 from courses.serializers import (
+    AIRecommendDataSerializer,
+    AIRecommendRequestSerializer,
     CourseCompleteDataSerializer,
     CourseCompleteSerializer,
     CoursesErrorResponseSerializer,
@@ -14,6 +16,7 @@ from courses.serializers import (
 )
 from courses.services import (
     complete_course,
+    request_ai_recommendation,
     save_course,
     share_course,
     start_course,
@@ -52,6 +55,55 @@ ShareResponse = inline_serializer(
         "error": serializers.JSONField(allow_null=True),
     },
 )
+AIRecommendResponse = inline_serializer(
+    "AIRecommendSuccess",
+    fields={
+        "success": serializers.BooleanField(),
+        "data": AIRecommendDataSerializer(),
+        "error": serializers.JSONField(allow_null=True),
+    },
+)
+
+
+class AIRecommendView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="AI 맞춤 코스 추천",
+        operation_id="recommend_ai",
+        tags=["Courses"],
+        request=AIRecommendRequestSerializer,
+        responses={
+            200: AIRecommendResponse,
+            400: CoursesErrorResponseSerializer,
+            401: CoursesErrorResponseSerializer,
+            422: CoursesErrorResponseSerializer,
+            500: CoursesErrorResponseSerializer,
+        },
+    )
+    def post(self, request):
+        serializer = AIRecommendRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        course = request_ai_recommendation(
+            user=request.user,
+            mood=data["mood"],
+            companion=data["companion"],
+            transport=data["transport"],
+            time_available=data["timeAvailable"],
+            free_text=data["freeText"],
+        )
+        return ApiResponse(
+            data={
+                "courseId": course.id,
+                "name": course.name,
+                "reason": course.recommend_reason,
+                "places": [
+                    {"placeId": item.place_id, "order": item.order}
+                    for item in course.places.order_by("order")
+                ],
+            }
+        )
 
 
 class CourseSaveView(APIView):

@@ -753,6 +753,7 @@ Notion 페이지: 설정, 온보딩
   - `requests`를 새 의존성으로 추가(`pyproject.toml`).
   - 환경변수(`.env.example`): `TOUR_API_BASE_URL`, `TOUR_API_SERVICE_KEY`, `TOUR_API_TIMEOUT_SEC`(기본 5).
   - 메서드: `search_spots(*, keyword=None, category=None, sigungu=None) -> list[RawSpot]`, `get_spot_detail(*, content_id: str) -> RawSpot | None`(공통정보+소개정보(`detailIntro2`, 주차장 필드 파싱 포함)+이미지정보 조합).
+  - KorService2의 `detailCommon2`/`detailImage2`는 KorService1용 선택 파라미터(`defaultYN`, `firstImageYN`, `areacodeYN`, `catcodeYN`, `addrinfoYN`, `mapinfoYN`, `overviewYN`, `subImageYN`)를 보내면 `INVALID_REQUEST_PARAMETER_ERROR`를 반환한다. 따라서 해당 파라미터는 보내지 않으며, `overview`를 포함한 공통 필드는 기본 응답으로 받는다.
   - 정확한 엔드포인트·파라미터·응답 필드명은 이 문서에서 확정하지 않는다 — 공식 문서로 최종 확인 후 이 어댑터 안에만 캡슐화한다. 조회 범위는 전남(area code) 한정.
   - 호출 실패(타임아웃·5xx·파싱 오류)는 `TourApiError`를 던지고, 서비스 계층에서 `ApiError(ErrorCode.EXTERNAL_API_ERROR)`로 변환(7.11.4).
 - **`places/tourist_congestion.py` — `TouristCongestionClient`**
@@ -1054,6 +1055,195 @@ urlpatterns = [
 2. **`COURSE_SHARE_BASE_URL`은 placeholder다.** 실제 프론트엔드 도메인이 정해지면 값을 교체해야 한다 — 지금은 "유효한 URL 형식의 문자열을 반환한다"는 계약만 만족시킨다.
 3. **`Course.owner`가 여러 사용자의 저장/시작을 어떻게 다루는지는 이번 스테이지에서 실사용 검증이 안 된다** — `Course`를 만드는 공개 API(Stage 3-②/③)가 아직 없어서 "한 코스를 여러 사용자가 공유해 각자 저장"하는 흐름은 fixture로만 테스트한다. Stage 3-② 착수 시 실제 흐름으로 재검증이 필요하다.
 4. 완주 인증의 순서 기반 1:1 페어링(7.12.3)은 Notion 계약상 유일하게 검증 가능한 해석이지만, 프론트엔드가 실제로 장소별 `placeId`를 체크인 요청에 함께 보낼 수 있다면(계약 확장) 순서 대신 명시적 매칭으로 바꾸는 게 더 안전하다 — 프론트 연동 시점에 재확인.
+
+### 7.13 `courses` 앱 AI 맞춤 추천 (Stage 3-②, `feature/courses-recommend`, GitHub 이슈 #18 기준)
+
+이 절의 근거는 GitHub 이슈 #18, Notion API spec "AI 맞춤 추천 요청"(`2b304d374d27839799ca01f2337488d5`), "데이터 모델링 (ERD)" 페이지의 `courses`/`course_places` 테이블(`39104d374d27814ea306e206cf41bf8c`)이다. 대상은 `POST /api/v1/recommend/ai` 한 엔드포인트뿐이다. 7.12절은 `Course`/`CoursePlace`가 "이미 존재한다고 가정"하고 그 위의 상태 전이 API만 다뤘는데, 이번 스테이지가 그 둘을 실제로 만드는 첫 공개 API다. 새 앱은 만들지 않고 기존 `courses` 앱에 필드 2개와 엔드포인트 1개만 추가한다.
+
+#### 7.13.1 모델 (`courses/models.py`)
+
+`Course`에 다음 두 필드만 추가한다. `mood`/`companion_type`/`transport_type`은 `feature/courses-base`에서 이미 `CharField(max_length=50, blank=True)`로 존재하므로(값 검증 없는 저장용 필드) 변경하지 않는다 — Notion 요청의 `companion`/`transport` 값 종류(아래 7.13.3) 검증은 시리얼라이저의 `ChoiceField`에서만 하고, 모델에는 `choices`를 걸지 않는다(7.13.5-②에서 이유 설명).
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `time_available` | `CharField(max_length=50, blank=True)` | Notion 요청 `timeAvailable` 그대로 저장(형식 자유, 예: `"2시간"`) |
+| `free_text` | `TextField(blank=True)` | Notion 요청 `freeText` 그대로 저장 |
+
+`python manage.py makemigrations courses`로 마이그레이션을 생성한다. `CoursePlace`/`CourseProgress`는 변경 없음.
+
+#### 7.13.2 에러 코드 (`common/exceptions.py` 추가)
+
+| 코드 | 상태코드 | 메시지 | 발생 조건 |
+|---|---|---|---|
+| `MOOD_REQUIRED` | 400 | 기분을 선택해주세요. | 요청의 `mood`가 없거나 공백 |
+| `AI_RECOMMEND_FAILED` | 500 | 추천 생성에 실패했습니다. | AI 추천 어댑터 호출 실패, 추천 결과에 장소가 하나도 없음, 또는 추천된 장소를 로컬 `TouristSpot`으로 확정(그라운딩)하는 데 실패(7.13.4) |
+
+기존 `ErrorCode` enum의 `(code, status_code, message)` 튜플 관례를 그대로 따른다.
+
+#### 7.13.3 엔드포인트
+
+**`POST /api/v1/recommend/ai`** — `permission_classes = [IsAuthenticated]`(Notion `authorization: required`)
+
+요청(`AIRecommendRequestSerializer`, `courses/serializers.py`):
+
+```json
+{
+  "mood": "string",
+  "companion": "혼자|커플|가족|친구",
+  "transport": "도보|대중교통|자차",
+  "timeAvailable": "string",
+  "freeText": "string"
+}
+```
+
+| 필드 | DRF 필드 | 비고 |
+|---|---|---|
+| `mood` | `CharField(required=False, allow_blank=True, default="", max_length=50)` | `mood`만 필수다. 필드를 `required=True`로 두면 DRF가 일반 `COMMON_422`로 먼저 걸러버려 `MOOD_REQUIRED`를 반환할 수 없으므로, 대신 `required=False, default=""`로 통과시킨 뒤 `validate_mood`에서 공백이면 `ApiError(ErrorCode.MOOD_REQUIRED)`를 직접 raise한다 — 6.4.2(`INVALID_CREDENTIALS`)와 같은 이유로 특정 도메인 에러 코드가 일반 422보다 우선한다. 길이는 모델과 동일하게 50자로 제한한다 |
+| `companion` | `ChoiceField(choices=["혼자","커플","가족","친구"], required=False, allow_blank=True, default="")` | 값이 4개 중 하나가 아니면 DRF 기본 동작대로 `COMMON_422`(6.6.8의 `provider` 검증과 동일 패턴) |
+| `transport` | `ChoiceField(choices=["도보","대중교통","자차"], required=False, allow_blank=True, default="")` | 위와 동일 |
+| `timeAvailable` | `CharField(required=False, allow_blank=True, default="", max_length=50)` | 모델 필드와 동일하게 50자로 제한한다 |
+| `freeText` | `CharField(required=False, allow_blank=True, default="", max_length=500)` | LLM 비용·지연 남용을 막기 위해 500자로 제한한다 |
+
+`mood` 이외 필드는 이슈 완료 조건에 별도 에러 코드가 없으므로 전부 선택값으로 둔다(0절 원칙 2 — 명세에 없는 필수 검증을 임의로 추가하지 않음).
+
+응답 `200`:
+
+```json
+{
+  "success": true,
+  "data": {
+    "courseId": 12,
+    "name": "...",
+    "reason": "...",
+    "places": [
+      { "placeId": 5, "order": 1 },
+      { "placeId": 9, "order": 2 }
+    ]
+  },
+  "error": null
+}
+```
+
+`courseId`/`placeId`는 Notion 명세상 타입이 `"string"`이지만, 이슈 완료 조건("응답의 courseId/placeId가 로컬 PK와 동일해 이후 장소 상세/코스 저장 API와 연결됨")에 따라 로컬 PK(정수)를 그대로 내려준다 — 7.11.6의 통합 검색 `id` 필드와 같은 판단이다. `reason`은 `Course.recommend_reason`과 키 이름이 다르다(6.4.3과 같은 이유로 이미 확정된 Notion 계약을 그대로 따르고 임의로 통일하지 않는다). `name`은 시리얼라이저 필드명이 요청 필드(`companion`/`transport`/`timeAvailable`)와 모델 필드명(`companion_type`/`transport_type`/`time_available`)이 달라 뷰에서 `courses/services.py`의 `request_ai_recommendation`을 호출할 때 명시적으로 매핑한다(6.5.3과 동일한 관례).
+
+#### 7.13.4 AI 추천 어댑터 인터페이스 및 서비스 계층
+
+**`courses/ai_recommend.py`** — `places/tourapi.py`(`TourApiClient`)·`places/kakao_mobility.py`(`KakaoMobilityClient`)와 같은 자리의 외부 연동 어댑터다.
+
+```python
+class AIRecommendError(Exception):
+    pass
+
+@dataclass(frozen=True)
+class RecommendedPlace:
+    content_id: str   # TourAPI content_id — places.TouristSpot.content_id와 동일 키(7.11.2)
+    order: int
+
+@dataclass(frozen=True)
+class AIRecommendation:
+    name: str
+    reason: str
+    places: list[RecommendedPlace]
+
+class AIRecommendClient:
+    def recommend(
+        self, *, mood: str, companion: str, transport: str,
+        time_available: str, free_text: str,
+    ) -> AIRecommendation:
+        raise NotImplementedError
+```
+
+**왜 장소를 로컬 PK가 아니라 `content_id`로 주고받는가**: AI 추천 로직이 자체 LLM 프롬프트든 외부 추천 API든, 이 서비스에서 실제 존재하는 관광지를 가리키는 안정적인 외부 식별자는 TourAPI `content_id`다(7.11.2). 어댑터는 `Course`/`CoursePlace` 모델이나 로컬 PK에 결합하지 않고 이 경계 계약을 유지한다. 후보를 가져오는 `search_spots`가 이미 모든 후보를 `TouristSpot`에 write-through하므로, 서비스는 추천된 `content_id`를 로컬 테이블에서 조회해 PK를 확정하며 TourAPI 상세를 다시 호출하지 않는다.
+
+**후보 검색 전략**: `mood`/`companion`/`transport`/`timeAvailable`은 장소 검색어가 아니므로 LLM 프롬프트 컨텍스트로만 사용한다. `freeText`가 있으면 우선 그 값으로 `searchKeyword2` 검색을 수행하되 결과가 없으면, 또는 `freeText`가 비어 있으면 `keyword=None`으로 `areaBasedList2`를 호출해 전남 전체 후보로 폴백한다. 두 조회 모두 결과가 없거나 검색 호출이 실패하면 `AIRecommendError`로 변환한다.
+
+**`courses/services.py` — `request_ai_recommendation`**
+
+```python
+def request_ai_recommendation(
+    *, user, mood, companion, transport, time_available, free_text
+) -> Course:
+    try:
+        recommendation = AIRecommendClient().recommend(
+            mood=mood, companion=companion, transport=transport,
+            time_available=time_available, free_text=free_text,
+        )
+    except AIRecommendError as exc:
+        raise ApiError(ErrorCode.AI_RECOMMEND_FAILED) from exc
+
+    if not recommendation.places:
+        raise ApiError(ErrorCode.AI_RECOMMEND_FAILED)
+
+    content_ids = [item.content_id for item in recommendation.places]
+    spots_by_content_id = {
+        spot.content_id: spot
+        for spot in TouristSpot.objects.filter(content_id__in=content_ids)
+    }
+    resolved = []
+    for item in recommendation.places:
+        spot = spots_by_content_id.get(item.content_id)
+        if spot is None:
+            raise ApiError(ErrorCode.AI_RECOMMEND_FAILED)
+        resolved.append((spot, item.order))
+
+    try:
+        with transaction.atomic():
+            course = Course.objects.create(
+                owner=user,
+                name=recommendation.name,
+                recommend_reason=recommendation.reason,
+                mood=mood,
+                companion_type=companion,
+                transport_type=transport,
+                time_available=time_available,
+                free_text=free_text,
+                status=Course.Status.TEMP,
+            )
+            CoursePlace.objects.bulk_create([
+                CoursePlace(course=course, place=spot, order=order)
+                for spot, order in resolved
+            ])
+    except IntegrityError as exc:
+        raise ApiError(ErrorCode.AI_RECOMMEND_FAILED) from exc
+    return course
+```
+
+- AI 호출과 후보 검색은 어댑터에서, 추천 장소의 로컬 조회는 서비스에서 모두 트랜잭션 밖에 수행한다. `transaction.atomic()`은 `Course`/`CoursePlace` DB 쓰기만 짧게 감싸며, 쓰기 실패 시 부분 생성된 코스를 전부 롤백한다.
+- `RecommendedPlace.order`는 1부터 시작하는 연속된 정수여야 `CoursePlace`의 `(course, order)` UNIQUE 제약(7.12.1)을 통과한다. 이를 어댑터 구현체가 보장하지 못하면 `IntegrityError`가 나고 `AI_RECOMMEND_FAILED`로 변환된다 — 별도의 사전 검증 로직을 추가하지 않고 DB 제약에 위임한다(0절 원칙 3).
+- `owner=user`로 항상 설정한다. 7.2절의 "AI 자동 생성 코스는 소유자 없을 수 있음"은 인증 없는 진입 경로를 상정한 서술이었지만, 이 엔드포인트는 `authorization: required`이므로 이번 스테이지에서는 `owner`가 항상 채워진다.
+- `Course.status`는 모델 기본값(`TEMP`)을 그대로 쓴다.
+
+#### 7.13.5 미해결 사항 (착수 시 결정 필요)
+
+1. **[해결] AI 추천 연동 방식.** OpenAI 호환 Chat Completions API를 `requests`로 직접 호출하는 자체 LLM 프롬프트 방식을 채택했다. `LLM_API_BASE_URL`/`LLM_API_KEY`/`LLM_API_MODEL`/`LLM_API_TIMEOUT_SEC` 환경변수로 공급자를 설정하며, `AIRecommendClient`는 후보에 포함된 TourAPI `content_id`만 반환하도록 응답을 검증한다.
+2. **[해결] AI가 고를 후보 관광지 풀의 범위.** 이미 로컬에 캐시된 장소로 한정하지 않고, `freeText`만 검색 키워드로 사용한다. 검색 결과가 없거나 `freeText`가 비어 있으면 키워드 없는 전남 전체 조회로 폴백하고, 그 결과를 로컬에 write-through한 뒤 LLM 후보 컨텍스트로 사용한다. 감정·동행·교통·시간 값은 LLM 컨텍스트로만 전달한다.
+3. `companion_type`/`transport_type`을 모델 `choices`로 강제하지 않고 시리얼라이저 `ChoiceField`로만 검증하기로 한 것(7.13.1)은, 가능한 값이 Notion에서 이미 4개/3개로 확정돼 있어 마이그레이션 없이 시리얼라이저만 바꿔 값 종류를 조정할 수 있게 하기 위한 의도적 선택이다. 값 종류가 자주 바뀌게 되면 모델에도 `choices`를 추가하는 쪽으로 재검토한다.
+4. `CoursePlace.travel_time_from_prev`는 이 API가 만든 `CoursePlace`에도 항상 `null`이다 — 동선 최적화(Stage 3-③, `feature/courses-optimize`) 착수 전까지는 채워지지 않는다.
+5. 이 API로 만든 `Course`에 대해 기존 저장/시작/완주 인증/공유(7.12절, #15)가 실제로 정상 동작하는지는 이번 이슈의 회귀 테스트(7.13.6)로만 확인한다 — `Course.owner`가 항상 채워진다는 점을 제외하면 7.12.8-③에서 남겼던 "다중 사용자 저장/시작" 시나리오는 여전히 fixture 기반 검증에 머무른다.
+
+#### 7.13.6 URL 등록 및 테스트 관점
+
+4개 상태 전이 API(7.12.5)와 달리 `/api/v1/recommend/ai`는 `/courses/{courseId}/...` 프리픽스에 맞지 않는다. `courses/urls.py`(prefix `api/v1/courses/`)에 넣지 않고, `places.urls`처럼 별도 파일을 새로 만들 것도 없이 `config/urls.py`에 직접 한 줄 등록한다(0절 원칙 3 — 엔드포인트 1개를 위해 앱/파일을 새로 쪼개지 않는다).
+
+```python
+# config/urls.py
+path("api/v1/recommend/ai", AIRecommendView.as_view(), name="recommend-ai"),
+```
+
+`AIRecommendView`는 `courses/views.py`에 추가하고, `courses/urls.py`의 4개 라우트와 마찬가지로 `drf_spectacular`의 `@extend_schema`를 붙인다.
+
+테스트(`tests/test_courses_recommend.py`, 신규) — API 서비스 테스트는 `courses.services.AIRecommendClient.recommend`만 mock 처리하고, 추천 장소 그라운딩은 fixture로 생성한 로컬 `TouristSpot` 조회를 실제로 수행한다.
+
+- 성공: 응답에 `courseId`/`name`/`reason`/`places`가 있고, 각 `places[i].order`가 요청 순서와 일치. 생성된 `Course.status == TEMP`, `Course.owner == request.user`, `CoursePlace`가 추천 순서대로 존재.
+- `mood` 누락/공백: `MOOD_REQUIRED`, 400.
+- AI 어댑터가 `AIRecommendError`를 던짐: `AI_RECOMMEND_FAILED`, 500, `Course`가 생성되지 않음(DB에 남지 않는지 확인).
+- AI 어댑터가 빈 `places`를 반환: `AI_RECOMMEND_FAILED`, 500.
+- 추천된 `content_id` 중 하나가 로컬 `TouristSpot`에 없음: `AI_RECOMMEND_FAILED`, 500, `Course`/`CoursePlace`가 생성되지 않음.
+- `freeText` 키워드 검색 결과가 없으면 키워드 없는 전남 전체 후보로 폴백하며, 폴백 결과도 비면 `AI_RECOMMEND_FAILED`, 500.
+- `mood`/`timeAvailable` 50자 및 `freeText` 500자 초과: `COMMON_422`.
+- `companion`/`transport`에 허용되지 않은 값: `COMMON_422`.
+- 인증 없이 호출: `AUTH_401`.
+- **회귀**: 이 API로 생성한 `Course`/`CoursePlace`에 대해 `POST /courses/{courseId}/save`·`/start`·`/complete`·`/share`(7.12절, `feature/courses-base`)를 순서대로 호출해 전부 기존과 동일하게 동작하는지 확인.
 
 ## 8. 단계별 구현 계획
 

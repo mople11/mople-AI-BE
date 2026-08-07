@@ -80,10 +80,10 @@ class TourApiClient:
         ]
 
     def get_spot_detail(self, *, content_id: str) -> RawSpot | None:
+        # KorService2 rejects KorService1's detail selection parameters; the
+        # required common fields (including overview) are returned by default.
         common = self._get_items("detailCommon2", {
-            **self._base_params(), "contentId": content_id, "defaultYN": "Y",
-            "firstImageYN": "Y", "areacodeYN": "Y", "catcodeYN": "Y",
-            "addrinfoYN": "Y", "mapinfoYN": "Y", "overviewYN": "Y",
+            **self._base_params(), "contentId": content_id,
         })
         if not common:
             return None
@@ -95,7 +95,7 @@ class TourApiClient:
         })
         images = self._get_items("detailImage2", {
             **self._base_params(), "contentId": content_id, "imageYN": "Y",
-            "subImageYN": "Y", "pageNo": 1, "numOfRows": 100,
+            "pageNo": 1, "numOfRows": 100,
         })
         image_urls = [image.get("originimgurl") for image in images if image.get("originimgurl")]
         if not image_urls and item.get("firstimage"):

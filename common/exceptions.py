@@ -60,6 +60,12 @@ class ErrorCode(Enum):
         400,
         "코스 경로와 위치가 일치하지 않습니다.",
     )
+    MOOD_REQUIRED = ("MOOD_REQUIRED", 400, "기분을 선택해주세요.")
+    AI_RECOMMEND_FAILED = (
+        "AI_RECOMMEND_FAILED",
+        500,
+        "추천 생성에 실패했습니다.",
+    )
 
     def __init__(self, code: str, status_code: int, message: str):
         self.code = code

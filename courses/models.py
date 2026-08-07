@@ -24,6 +24,8 @@ class Course(models.Model):
     mood = models.CharField(max_length=50, blank=True)
     companion_type = models.CharField(max_length=50, blank=True)
     transport_type = models.CharField(max_length=50, blank=True)
+    time_available = models.CharField(max_length=50, blank=True)
+    free_text = models.TextField(blank=True)
     status = models.CharField(
         max_length=10,
         choices=Status.choices,

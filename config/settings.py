@@ -16,6 +16,7 @@ env = environ.Env(
     TOUR_CONGESTION_API_TIMEOUT_SEC=(int, 5),
     KAKAO_MOBILITY_TIMEOUT_SEC=(int, 5),
     COURSE_CHECKIN_RADIUS_M=(int, 200),
+    LLM_API_TIMEOUT_SEC=(int, 15),
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
@@ -170,6 +171,14 @@ KAKAO_MOBILITY_REST_API_KEY = env(
     "KAKAO_MOBILITY_REST_API_KEY", default=""
 )
 KAKAO_MOBILITY_TIMEOUT_SEC = env("KAKAO_MOBILITY_TIMEOUT_SEC")
+
+LLM_API_BASE_URL = env(
+    "LLM_API_BASE_URL",
+    default="https://api.openai.com/v1",
+)
+LLM_API_KEY = env("LLM_API_KEY", default="")
+LLM_API_MODEL = env("LLM_API_MODEL", default="gpt-4.1-mini")
+LLM_API_TIMEOUT_SEC = env("LLM_API_TIMEOUT_SEC")
 
 COURSE_CHECKIN_RADIUS_M = env("COURSE_CHECKIN_RADIUS_M")
 COURSE_SHARE_BASE_URL = env(

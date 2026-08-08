@@ -633,10 +633,15 @@ Notion 페이지: 통합 검색, 관광지 혼잡도, 장소 상세, 실시간 �
 
 Notion 페이지: AI 맞춤 추천 입력, 코스 동선 최적화, 추천 코스 결과
 
-- **`Course`**: `name`, `owner`(추천/저장한 User, null 허용 — AI 자동 생성 코스는 소유자 없을 수 있음), `duration_minutes`, `distance_km`, `recommend_reason`(AI 추천 이유 텍스트), `mood`/`companion_type`/`transport_type`(추천 입력값 기록용)
+- **`Course`**: `name`, `owner`(추천/저장한 User, null 허용 — AI 자동 생성 코스는 소유자 없을 수 있음), `duration_minutes`, `distance_km`, `recommend_reason`(AI 추천 이유 텍스트), `mood`/`companion_type`/`transport_type`(추천 입력값 기록용), `status`(`TEMP`/`SAVED`, 실제 구현에 반영됨)
 - **`CoursePlace`** (through 모델): `course` FK, `place` FK, `order`(방문 순서), `travel_time_from_prev`(구간 이동 시간 — 카카오 로컬 API 결과 캐시)
 - **AI 코스 추천/동선 최적화 자체는 모델이 아니라 서비스 로직** (외부 AI/카카오 로컬 API 연동). 이 스테이지에서는 요청·응답 스키마와 `Course`/`CoursePlace` 저장 구조만 확정하고, 추천 알고리즘 연동은 별도로 설계.
 - "코스 시작/완주" 상태는 `Course`에 두지 않고 사용자별 진행 기록이 필요하므로 `CourseProgress`(user FK, course FK, started_at, completed_at) 모델로 분리.
+
+**실행 상세 설계**는 이슈 단위로 아래에 따로 정리한다:
+- 저장/시작/완주인증/공유(`feature/courses-base`) — **완료**, 7.12절.
+- AI 맞춤 추천(`feature/courses-recommend`) — **완료**, 7.13절.
+- 코스 동선 최적화(`feature/courses-optimize`) — 7.14절.
 
 ### 7.3 `reviews` — 후기·만족도 그룹
 
@@ -647,41 +652,54 @@ Notion 페이지: 후기 작성, 후기 목록
 - 신고("신고" 버튼)는 `ReviewReport`(user, review, reason, created_at)로 별도 모델
 - "AI 예상 만족도"/키워드 요약은 저장 데이터가 아니라 리뷰 누적 데이터를 배치/집계해서 계산하는 값 — Review 모델 자체에는 필드 불필요, 별도 집계 서비스에서 처리
 
+**실행 상세 설계는 착수 시 7.15절에 작성한다**(`feature/reviews`) — API spec/ERD를 다시 확인한 결과 `targetId` 단일 필드로 대상 종류가 모호한 지점 등 착수 전 재확인이 필요한 사항이 있다(`docs/roadmap.md` 5절).
+
 ### 7.4 `interactions` — 찜하기(Bookmark)
 
 Notion 페이지: 장소 상세("찜하기"), 추천 코스 결과("코스 저장"), 마이페이지("찜 목록")
 
-- **`Bookmark`**: `user` FK, `place` FK(null 허용), `course` FK(null 허용), `(user, place)` / `(user, course)` 각각 unique. 제네릭 FK 대신 nullable FK 두 개로 구현 — Django Admin/쿼리 가독성이 더 좋고, 대상이 Place/Course 두 종류로 고정되어 있어 GenericForeignKey의 유연성이 필요 없음.
-- 기존에 "Like" 모델로 임시 설계했던 것은 폐기 — Notion 명세엔 범용 좋아요가 아니라 찜하기(Bookmark)와 후기 도움돼요(ReviewHelpful) 두 가지뿐이다.
+- **`Bookmark`**: `user` FK, `place` FK, `(user, place)` unique. API spec 재확인 결과 찜 엔드포인트는 `POST /places/{placeId}/like` 하나뿐이고 코스 찜은 없어(ERD `wishlists`도 장소만 가짐) **장소 전용**으로 확정했다(`docs/roadmap.md` 5절). 코스 저장은 Stage 3의 `CourseProgress.status=SAVED`가 이미 담당한다.
+- 기존에 "Like" 모델로 임시 설계했던 것은 폐기.
+
+**실행 상세 설계는 착수 시 7.16절에 작성한다**(`feature/interactions-bookmark`).
 
 ### 7.5 `gamification` — 게이미피케이션 그룹
 
 Notion 페이지: 지역 스탬프(스탬프북), 숨겨진 여행지(Weather Unlock), 완주 카드
 
-- **`RegionStamp`**: 전남 22개 시군 마스터 데이터 (`name`), 관리자 페이지에서 등록
+- **`RegionStamp`**: 전남 22개 시군 마스터 데이터 (`name`), 관리자 페이지에서 등록 — *착수 시 재검토: ERD/API spec 재확인 결과 마스터 테이블 없이 `Stamp.city_code`를 choices로 직접 쓰는 쪽이 계약과 더 맞는다(`docs/roadmap.md` 5절).*
 - **`UserStamp`**: `user` FK, `region_stamp` FK, `acquired_at`, `(user, region_stamp)` unique — 체크인 시 생성
-- **`HiddenCourse`**: `course` FK(OneToOne 또는 FK), `rarity`(LEGENDARY/RARE/UNCOMMON/COMMON), `unlock_condition`(날씨/계절/시간대 조건 — 조건 매칭 로직은 서비스 계층)
+- **`HiddenCourse`**: `course` FK(OneToOne 또는 FK), `rarity`(LEGENDARY/RARE/UNCOMMON/COMMON), `unlock_condition`(날씨/계절/시간대 조건 — 조건 매칭 로직은 서비스 계층). **API 재확인 결과 이 방향(코스 단위)이 맞다고 확정됨** — `GET /courses/unlocked`가 `courseId`/`rarity`로 응답한다(`docs/roadmap.md` 5절).
 - **`UserHiddenCourseUnlock`**: `user` FK, `hidden_course` FK, `unlocked_at`
-- **`CompletionCard`**: `user` FK, `course` FK, `photo`(선택), `created_at` — 완주 인증 카드, SNS 공유 링크는 저장하지 않고 요청 시 생성
+- **`CompletionCard`**: `user` FK, `course` FK, `photo`(선택), `created_at` — 완주 인증 카드, SNS 공유 링크는 저장하지 않고 요청 시 생성. **API 재확인 결과 course 단위가 맞다고 확정됨**(`POST /cards/completion`이 `courseId` 필수, `GET /cards` 응답에 `courseName`).
+
+**실행 상세 설계는 착수 시 7.17절에 작성한다**(`feature/gamification`).
 
 ### 7.6 `mypage` — 마이페이지 그룹
 
 Notion 페이지: 마이페이지
 
-- 자체 모델 없음. `accounts.User`, `courses.Course`/`CourseProgress`, `reviews.Review`, `interactions.Bookmark`, `gamification`을 조합해 조회 전용 API(`GET /api/v1/mypage`, `/wishlist`, `/courses`, `/reviews`)로 노출. 프로필 수정(`PATCH /api/v1/mypage/profile`)만 `accounts.User`를 갱신.
+- 자체 모델 없음. `accounts.User`, `courses.Course`/`CourseProgress`, `reviews.Review`, `interactions.Bookmark`, `gamification`을 조합해 조회 전용 API(`GET /users/me`, `/users/me/courses`, `/users/me/reviews`, `/users/me/likes`)로 노출. 프로필 수정(`PATCH /users/me`)만 `accounts.User`를 갱신.
+- **착수 전 중요 확인 사항**: `PATCH /users/me`가 요구하는 `profileImg`/`NICKNAME_DUPLICATE` 검증을 위해, 이미 머지된 `accounts.User`(Stage 1)에 `profile_img` 필드 추가 + `nickname` `unique=True` 마이그레이션이 필요하다. 기존 DB에 중복 닉네임이 있으면 마이그레이션이 실패하므로 착수 전 확인 필요(`docs/roadmap.md` 4절 Stage 6).
+
+**실행 상세 설계는 착수 시 7.18절에 작성한다**(`feature/mypage`).
 
 ### 7.7 `home` — Home 그룹
 
 Notion 페이지: 메인(홈)
 
-- 자체 모델 없음. 위치·날씨(기상청 API 연동, 연동 방식은 별도 설계 필요) 기준으로 `places`/`courses` 앱의 데이터를 조회해 추천 카드를 구성하는 조회 전용 API. 날씨 API 연동 지점만 이 단계에서 인터페이스로 확정하고 실제 공급자는 이후 스테이지에서 결정.
+- 자체 모델 없음. 위치·날씨(기상청 API 연동, 연동 방식은 별도 설계 필요) 기준으로 `places`/`courses` 앱의 데이터를 조회해 추천 카드를 구성하는 조회 전용 API(`GET /weather/current`, `GET /home`). 둘 다 `authorization: none`. `home`은 `courses`(Stage 3)·`gamification`(Stage 5)에 의존하므로 그 두 Stage 완료 후 완전한 형태로 구현 가능하다.
+
+**실행 상세 설계는 착수 시 7.19절에 작성한다**(`feature/home`).
 
 ### 7.8 `common` — 공통 그룹 (Settings)
 
 Notion 페이지: 설정, 온보딩
 
-- **`UserSettings`**: `user` OneToOne FK, `push_notification_enabled`, `golden_hour_notification_enabled`, `language`(한/영/일/중)
+- **`UserSettings`**: `user` OneToOne FK, `push_notification_enabled`, `golden_hour_notification_enabled`, `language`(한/영/일/중), `location_permission_granted`(API 재확인 결과 응답에 `permissions.location`이 있어 추가 확인됨). 응답은 `notifications`/`permissions`로 중첩된 구조다(`docs/roadmap.md` 5절).
 - 온보딩은 서버 상태가 없는 클라이언트 전용 화면 — 백엔드 모델/엔드포인트 불필요 (위치 권한 요청은 클라이언트 OS 레벨 처리)
+
+**실행 상세 설계는 착수 시 7.20절에 작성한다**(`feature/common-settings`).
 
 ### 7.9 관리자 기능
 
@@ -1245,15 +1263,360 @@ path("api/v1/recommend/ai", AIRecommendView.as_view(), name="recommend-ai"),
 - 인증 없이 호출: `AUTH_401`.
 - **회귀**: 이 API로 생성한 `Course`/`CoursePlace`에 대해 `POST /courses/{courseId}/save`·`/start`·`/complete`·`/share`(7.12절, `feature/courses-base`)를 순서대로 호출해 전부 기존과 동일하게 동작하는지 확인.
 
+### 7.14 `courses` 앱 상세 설계 (Stage 3-③ 실행용, `feature/courses-optimize`)
+
+> Notion API spec "코스 동선 최적화"(`d0904d374d2782a68116012c2f5c894f`) 페이지 근거.
+
+#### 7.14.1 에러 코드
+
+| 코드 | 상태코드 | 메시지 | 발생 조건 |
+|---|---|---|---|
+| `MIN_PLACE_REQUIRED` | 400 | 장소를 2개 이상 선택해주세요. | `placeIds`가 2개 미만 |
+| `ROUTE_CALC_FAILED` | 500 | 경로 계산에 실패했습니다. | 카카오 로컬 API 호출/파싱 실패 |
+
+#### 7.14.2 `POST /courses/optimize`
+
+**요청**
+```json
+{ "placeIds": ["string"], "transport": "도보|차량|대중교통" }
+```
+
+**서비스 로직** (`optimize_route`)
+1. `placeIds`가 2개 미만이면 `MIN_PLACE_REQUIRED`.
+2. `places.kakao_mobility.KakaoMobilityClient`(Stage 2에서 이미 도입, 실시간 교통 혼잡 안내용)를 재사용해 최적 방문 순서와 구간별 소요시간을 계산한다. 실패 시 `ROUTE_CALC_FAILED`.
+
+**응답 `200`**
+```json
+{ "success": true, "data": { "orderedPlaces": ["3", "1", "2"], "segmentTimes": [12, 8], "totalTime": 20, "route": {} }, "error": null }
+```
+
+**중요한 미확정 지점**: 요청 바디에 `courseId`가 없다 — `Course`에 묶이지 않은 순수 계산 API이고, 응답을 실제 `CoursePlace.order`/`travel_time_from_prev`에 반영하는 저장 엔드포인트가 Notion 명세에 없다. 이번 브랜치는 **계산 결과만 응답하고 저장하지 않는다**. 프론트가 이 결과로 무엇을 하는지는 착수 전 확인 필요(7.14.4 미해결 사항 1).
+
+#### 7.14.3 테스트 관점
+
+- 성공 — `placeIds` 2개 이상: `orderedPlaces`/`segmentTimes`/`totalTime` 응답 확인. `KakaoMobilityClient`는 mock.
+- 실패 — `placeIds` 1개: `MIN_PLACE_REQUIRED`, 400.
+- 실패 — 카카오 API mock 실패: `ROUTE_CALC_FAILED`, 500.
+
+#### 7.14.4 미해결 사항
+
+1. 동선 최적화 결과를 실제 `CoursePlace`에 반영하는 흐름이 명세에 없다(7.14.2) — 프론트 연동 방식 확인 필요.
+
+### 7.15 `reviews` 앱 상세 설계 (Stage 4 실행용, `feature/reviews`)
+
+> Notion "API spec" DB의 "후기·만족도" 그룹(엔드포인트 5개 확정)과 "데이터 모델링 (ERD)" 페이지 근거(`docs/roadmap.md` 5절).
+
+이번 스테이지 범위는 5개 전부다: **후기 작성**(`POST /reviews`), **후기 목록 조회**(`GET /reviews`, `authorization: none`), **후기 도움돼요**(`POST /reviews/{reviewId}/helpful`), **후기 신고**(`POST /reviews/{reviewId}/report`), **AI 만족도·키워드 요약**(`GET /reviews/summary`, `authorization: none`).
+
+#### 7.15.1 `targetId` 대상 모호성 (착수 전 반드시 확인)
+
+후기 작성·목록 조회·AI 만족도 요약 3개 엔드포인트 모두 요청에 `place`/`course` 구분 없이 **`targetId` 단일 필드**만 받는다(대상 타입을 알려주는 `targetType` 같은 필드가 없다). 반면 ERD의 `reviews` 테이블은 `tourist_spot_id`가 **NOT NULL**, `course_id`는 nullable이다.
+
+**이번 스테이지는 ERD를 따라 `targetId`를 항상 `TouristSpot` PK로 해석한다.** `Review.place`는 필수 FK로 두고, 이번 API 3종만으로는 `course_id`를 채울 방법이 없다. 코스 단위 후기가 실제로 필요하면 `targetType` 파라미터 추가를 프론트와 협의해야 한다 — 이번 문서에서 임의로 추가하지 않는다(0절 원칙 2, 7.15.8 미해결 사항 1).
+
+#### 7.15.2 모델
+
+**`Review`**
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `user` | FK to User | |
+| `place` | FK to `places.TouristSpot` | ERD `tourist_spot_id`, NOT NULL — 7.15.1 참고 |
+| `course` | FK to `courses.Course`, `null=True` | ERD `course_id`, nullable. 이번 3개 엔드포인트로는 채워지지 않음(7.15.1) |
+| `rating` | `PositiveSmallIntegerField`, 1~5 | 요청의 `rating`(정수) |
+| `content` | `TextField` | 요청 필드명은 `text` — 시리얼라이저에서 `text` → `content` 매핑 |
+| `visit_date` | `DateField`, null 허용 | 요청의 `visitDate` |
+| `weather_at_visit` | `CharField`, blank 허용 | 요청의 `visitWeather` |
+| `like_count` | `PositiveIntegerField`, default 0 | ERD 캐시 컬럼. "후기 도움돼요" 호출 시 갱신(7.15.5) |
+
+**`ReviewPhoto`** (ERD `review_photos`)
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `review` | FK to `Review` | |
+| `image_url` | `URLField` | 요청의 `photos: [string]` 배열 원소. URL 그대로 저장(Stage 2 `TouristSpotImage`와 동일 패턴) |
+| `display_order` | `PositiveSmallIntegerField`, default 0 | 요청 배열 순서를 그대로 따른다 |
+
+**`ReviewReaction`** (ERD `review_reactions`)
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `review` | FK to `Review` | `(review, user)` unique |
+| `user` | FK to User | |
+| `reaction_type` | `CharField`, choices | 현재 확정된 액션은 "도움돼요" 하나뿐이라 `HELPFUL` 한 값만 사용한다 |
+
+**`ReviewReport`** (ERD에는 없는 테이블 — API spec 기준으로 별도 유지)
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `review` | FK to `Review` | |
+| `user` | FK to User | |
+| `reason` | `TextField` | 요청의 `reason` |
+| `created_at` | `DateTimeField(auto_now_add=True)` | |
+
+#### 7.15.3 에러 코드
+
+| 코드 | 상태코드 | 메시지 | 발생 조건 |
+|---|---|---|---|
+| `RATING_REQUIRED` | 400 | 별점을 선택해주세요. | 후기 작성 시 `rating` 누락 |
+| `PLACE_NOT_FOUND` | 404 | 장소 정보를 찾을 수 없습니다. | 후기 작성 시 `targetId`에 해당하는 `TouristSpot`이 없음(Stage 2 코드 재사용) |
+| `REVIEW_NOT_FOUND` | 404 | 존재하지 않는 후기입니다. | 도움돼요/신고 요청의 `reviewId`가 없음 |
+
+`AI 만족도·키워드 요약`의 `INSUFFICIENT_DATA`는 `ApiError`로 만들지 않는다 — HTTP 200 + 빈 `data`로 응답하는 정상 케이스(관광지 혼잡도 7.11.4와 동일 패턴).
+
+#### 7.15.4 `POST /reviews` — 후기 작성
+
+**요청**
+```json
+{ "targetId": "string", "rating": 0, "text": "string", "photos": ["string"], "visitDate": "string", "visitWeather": "string" }
+```
+
+**서비스 로직** (`reviews/services.py`, `create_review`)
+1. `rating` 누락 시 `RATING_REQUIRED`.
+2. `targetId`로 `TouristSpot` 조회(7.15.1) — 없으면 `PLACE_NOT_FOUND`.
+3. `Review` 생성 후 `photos` 배열 순서대로 `ReviewPhoto` 일괄 생성.
+
+**응답 `200`**: `{ "success": true, "data": { "reviewId": "1" }, "error": null }`
+
+#### 7.15.5 `GET /reviews` — 후기 목록 조회 (`authorization: none`)
+
+쿼리: `targetId`(필수), `sort`(`latest|rating`, 선택).
+
+```json
+{ "success": true, "data": { "reviews": [ { "reviewId": "1", "author": "여행자", "rating": 5, "text": "...", "photos": ["https://..."], "visitWeather": "맑음" } ] }, "error": null }
+```
+
+`author`는 작성자 `nickname`(6.4.3절과 동일). `sort=rating`은 내림차순, 기본은 최신순. 결과 없으면 `reviews: []`.
+
+#### 7.15.6 `POST /reviews/{reviewId}/helpful` — 후기 도움돼요
+
+**토글 방식으로 설계한다(Notion 명세에 명시는 없음, 이 문서의 설계 결정)**: 이미 해당 유저의 `ReviewReaction(reaction_type=HELPFUL)`이 있으면 삭제하고 `like_count` 감소, 없으면 생성하고 증가. 프론트가 취소 동작을 지원하지 않으면 add-only로 바꿔야 한다(7.15.8 미해결 사항 2).
+
+**응답 `200`**: `{ "success": true, "data": { "count": 12 }, "error": null }`
+
+#### 7.15.7 `POST /reviews/{reviewId}/report` — 후기 신고
+
+**요청**: `{ "reason": "string" }`
+
+`(review, user)` unique로 중복 신고를 막고, 이미 신고한 후기를 다시 신고하면 기존 신고를 그대로 성공 응답으로 처리한다(멱등).
+
+**응답 `200`**: `{ "success": true, "data": { "reported": true }, "error": null }`
+
+#### 7.15.8 `GET /reviews/summary` — AI 만족도·키워드 요약 (`authorization: none`)
+
+쿼리: `targetId`(7.15.1과 동일하게 해석).
+
+```json
+{ "success": true, "data": { "score": 82, "keywords": { "positive": ["친절해요"], "negative": ["주차 불편"] } }, "error": null }
+```
+
+데이터 부족 시: `{ "success": true, "data": {}, "error": null }`. AI 연동 방식은 확정하지 않는다(미해결 사항 3). 완성되면 `places` 7.11.6절의 `reviewSummary` 고정값을 실제 값으로 교체해야 한다(7.11.8 미해결 사항 3과 연결).
+
+**미해결 사항**
+1. `targetId`가 코스 후기를 지원해야 하는지(7.15.1).
+2. "도움돼요" 토글 여부(7.15.6)는 이 문서의 가정.
+3. AI 만족도·키워드 요약의 실제 분석 로직/연동 대상 미정.
+4. Stage 4 완료 후 `places` 앱의 `avgRating`/`aiSatisfaction`/통합검색 `rating` 고정값을 실제 값으로 교체.
+5. `review_count` 캐시를 `TouristSpot`에 둘지 미정.
+
+**테스트 관점** (`tests/test_reviews_*.py`, 신규)
+- 후기 작성 성공/실패(`RATING_REQUIRED`/`PLACE_NOT_FOUND`).
+- 후기 목록 조회 정렬 확인.
+- 도움돼요 토글(증가/취소), `REVIEW_NOT_FOUND`.
+- 신고 멱등 확인, `REVIEW_NOT_FOUND`.
+- AI 만족도 — 데이터 충분/부족 케이스.
+
+### 7.16 `interactions` 앱 상세 설계 (Stage 4 실행용, `feature/interactions-bookmark`)
+
+> Notion API spec "찜하기 토글"(`50704d374d27825c967e8151fa82ed51`) 페이지 근거.
+
+#### 7.16.1 모델
+
+**`Bookmark`** (ERD `wishlists`)
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `user` | FK to User | |
+| `place` | FK to `places.TouristSpot` | `(user, place)` unique |
+| `created_at` | `DateTimeField(auto_now_add=True)` | |
+
+#### 7.16.2 에러 코드
+
+| 코드 | 상태코드 | 메시지 | 발생 조건 |
+|---|---|---|---|
+| `PLACE_NOT_FOUND` | 404 | 장소 정보를 찾을 수 없습니다. | 찜하기 토글 요청의 `placeId`가 없음(Stage 2 코드 재사용) |
+
+#### 7.16.3 `POST /places/{placeId}/like` — 찜하기 토글
+
+1. `placeId`로 `TouristSpot` 조회 — 없으면 `PLACE_NOT_FOUND`.
+2. `Bookmark(user, place)`가 있으면 삭제(`liked: false`), 없으면 생성(`liked: true`) — 후기 도움돼요(7.15.6)와 동일한 토글 패턴.
+
+**응답 `200`**: `{ "success": true, "data": { "liked": true }, "error": null }`
+
+**테스트 관점** (`tests/test_interactions_bookmark.py`, 신규)
+- 찜하기 토글 최초 호출/재호출(취소), `PLACE_NOT_FOUND`.
+
+### 7.17 `gamification` 앱 상세 설계 (Stage 5 실행용, `feature/gamification`)
+
+> Notion "게이미피케이션" 그룹 API spec 6개 전부와 ERD를 근거로 한다. **중요**: `docs/roadmap.md` 5절에서 이미 정리했듯, "숨겨진 여행지"·"완주카드"는 ERD(`weather_unlocks`/`card_type`)와 실제 API 응답(`GET /courses/unlocked`의 `courseId`, `POST /cards/completion`의 `courseId` 필수)이 상충해 **API 계약을 우선**했다 — 코스 단위로 확정.
+
+범위: **위치 체크인**(`POST /stamps/checkin`), **스탬프북 현황 조회**(`GET /stamps`), **숨겨진 여행지 목록 조회**(`GET /courses/unlocked`), **완주 카드 생성**(`POST /cards/completion`), **완주 카드 컬렉션 조회**(`GET /cards`), **완주 카드 공유**(`POST /cards/{cardId}/share`).
+
+#### 7.17.1 스탬프 모델
+
+**`Stamp`** (ERD `stamps` 방향 채택 — `RegionStamp` 마스터 테이블 없이 지역 코드를 choices로 직접 저장)
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `user` | FK to User | `(user, city_code)` unique |
+| `city_code` | `CharField`, choices | 전남 22개 시군 코드. 정확한 코드 체계는 착수 시 확인(미해결 사항 1) |
+| `acquired_at` | `DateTimeField(auto_now_add=True)` | |
+
+ERD의 `related_user_course_id`는 채택하지 않는다 — 체크인 요청이 `lat`/`lng`만 받고 `courseId`를 받지 않는다.
+
+#### 7.17.2 숨겨진 여행지(코스) 모델
+
+**`HiddenCourse`**: `course`(`OneToOneField` to `courses.Course`), `rarity`(choices `LEGENDARY`/`RARE`/`UNCOMMON`/`COMMON`), `unlock_condition`(`TextField`, 사람이 읽는 조건 설명 — 실제 매칭 로직은 서비스 계층).
+
+**`UserHiddenCourseUnlock`**: `user` FK, `hidden_course` FK(`(user, hidden_course)` unique), `unlocked_at`.
+
+#### 7.17.3 완주 카드 모델
+
+**`CompletionCard`**: `user` FK, `course` FK(`(user, course)` unique), `user_photo`(`URLField`, null 허용, 요청의 `userPhoto`), `card_image_url`(`URLField`, `cardImageUrl`), `created_at`(`GET /cards` 응답의 `date`).
+
+ERD `card_type` 기준 UNIQUE는 채택하지 않는다 — API 계약 전체가 "완주 한 코스당 카드 한 장"을 전제한다.
+
+**완주 인증(7.12.3, `complete_course`)의 `cardId`와의 관계**: 완주 인증은 `CourseProgress`만 `COMPLETED`로 갱신할 뿐 `CompletionCard`를 생성하지 않는다 — 카드 생성은 사용자가 사진을 첨부해 별도로 호출하는 `POST /cards/completion`의 몫이다. 따라서 완주 인증 응답의 `cardId`는 이 스테이지 이후에도 계속 `null`이 맞다 — 두 API는 서로 다른 호출이므로 자동 연결되지 않는다.
+
+#### 7.17.4 에러 코드
+
+| 코드 | 상태코드 | 메시지 | 발생 조건 |
+|---|---|---|---|
+| `OUT_OF_REGION` | 400 | 해당 지역에서만 체크인할 수 있습니다. | 체크인 좌표가 전남 22개 시군 밖 |
+| `COURSE_NOT_COMPLETED` | 400 | 완주하지 않은 코스입니다. | 완주 카드 생성 시 `CourseProgress.status`가 `COMPLETED`가 아님 |
+
+`ALREADY_ACQUIRED`는 `ApiError`가 아니다 — HTTP 200 + `data.stampAcquired: false`인 정상 케이스.
+
+#### 7.17.5 엔드포인트
+
+**`POST /stamps/checkin`**: `{lat,lng}` → 좌표→시군 코드 변환(방식 미확정, 미해결 사항 2) 후 매칭 없으면 `OUT_OF_REGION`. 이미 보유하면 `{stampAcquired:false, cityCode}`(200), 없으면 생성 후 `{stampAcquired:true, cityCode}`.
+
+**`GET /stamps`**: `{collected, totalCount:22, progress}`. `progress`는 `round(len(collected)/22*100)`(가정, 미해결 사항 3).
+
+**`GET /courses/unlocked`** — query `lat`,`lng`: 주변 `HiddenCourse` 전체를 유저의 `UserHiddenCourseUnlock` 존재 여부로 `unlockedCourses`/`lockedCourses` 분리. "주변" 반경 미확정(미해결 사항 4).
+
+**`POST /cards/completion`**: `{courseId, userPhoto}` → 해당 유저의 `CourseProgress(course_id=courseId)`가 `COMPLETED`가 아니면 `COURSE_NOT_COMPLETED`. 통과 시 `CompletionCard` upsert, `{cardId, cardImageUrl}` 응답. 이미지 합성 로직 미확정(미해결 사항 5).
+
+**`GET /cards`**: `{cards:[{cardId, courseName, date, imageUrl}]}`.
+
+**`POST /cards/{cardId}/share`**: 코스 공유(7.12.3 `share_course`)와 동일한 패턴 — 저장 없이 URL만 생성. 전용 에러코드 없어 존재하지 않는 `cardId`는 공통 404 처리(미해결 사항 6).
+
+#### 7.17.6 미해결 사항
+
+1. `Stamp.city_code` 코드 체계 미확정.
+2. 좌표→시군 판별(reverse geocoding) 방식 미확정.
+3. `GET /stamps`의 `progress` 단위(퍼센트 vs 비율) 가정.
+4. `GET /courses/unlocked`의 "주변" 반경 미확정.
+5. 완주 카드 이미지 합성 로직 미확정.
+6. 완주 카드 공유의 `cardId` 없음 케이스 전용 에러코드 여부 미정.
+
+**테스트 관점** (`tests/test_gamification_*.py`, 신규)
+- 체크인 성공/이미획득/`OUT_OF_REGION`.
+- 스탬프북 조회 값 확인.
+- 숨겨진 여행지 unlock 분리 확인.
+- 완주 카드 생성 성공/`COURSE_NOT_COMPLETED`.
+- 완주 카드 컬렉션 조회, 공유 확인.
+
+### 7.18 `mypage` 앱 상세 설계 (Stage 6 실행용, `feature/mypage`)
+
+> Notion "마이페이지" 그룹 API spec 6개 확정 경로(`/users/me/...`) 근거.
+
+#### 7.18.1 착수 전 확인 필요 — `accounts.User` 필드 보강
+
+**`PATCH /users/me`(프로필 수정) 요청에 `profileImg`가 있는데, Stage 1에서 구현된 `accounts.User`(`accounts/models.py`)에는 프로필 이미지 필드가 없다.** 이번 스테이지에서 `accounts.User.profile_img`(`URLField`, null/blank 허용) 필드와 마이그레이션을 추가해야 한다.
+
+또한 `PATCH /users/me`는 `NICKNAME_DUPLICATE`(409) 에러를 정의하는데, 실제 구현된 `accounts.User.nickname`은 `CharField(max_length=50)`로 `unique` 제약이 없다(`accounts/models.py:11`). 이번 스테이지에서 `nickname`에 `unique=True` 마이그레이션을 추가해야 하며, 기존 데이터에 중복 닉네임이 있으면 마이그레이션이 실패하므로 착수 전에 실제 DB를 확인해야 한다(미해결 사항 1).
+
+#### 7.18.2 엔드포인트
+
+| API | Endpoint | 비고 |
+|---|---|---|
+| 내 프로필·활동요약 조회 | `GET /users/me` | `profile:{nickname, profileImg}`, `stats:{completedCourses, stamps, reviews}` |
+| 프로필 수정 | `PATCH /users/me` | `{nickname, profileImg}` → `{updated:true}`, `NICKNAME_DUPLICATE`(409) |
+| 저장한 코스 목록 조회 | `GET /users/me/courses` | `{courses:[{courseId, name}]}` |
+| 내 후기 목록 조회 | `GET /users/me/reviews` | `{reviews:[{reviewId, targetName, rating}]}` |
+| 찜 목록 조회 | `GET /users/me/likes` | `{places:[{placeId, name}]}` |
+
+(찜하기 자체는 `POST /places/{placeId}/like`로 `interactions` 앱 소관, 7.16절.)
+
+#### 7.18.3 서비스 로직
+
+- **`GET /users/me`**: `stats.completedCourses`는 `CourseProgress.objects.filter(user=..., status="COMPLETED").count()`, `stats.stamps`는 `Stamp.objects.filter(user=...).count()`, `stats.reviews`는 `Review.objects.filter(user=...).count()`.
+- **`PATCH /users/me`**: `nickname` 변경 시 자신을 제외한 중복 검사 후 `NICKNAME_DUPLICATE`(signup의 `DUPLICATE_ID` 검증과 동일 패턴, 6.2절).
+- **`GET /users/me/courses`**: `CourseProgress.objects.filter(user=request.user, status__in=["SAVED","IN_PROGRESS","COMPLETED"])` → `course.name`.
+- **`GET /users/me/reviews`**: `Review.objects.filter(user=request.user)` → `targetName`은 `review.place.name`.
+- **`GET /users/me/likes`**: `Bookmark.objects.filter(user=request.user)` → `place.id`/`place.name`.
+
+**미해결 사항**
+1. `nickname` unique 마이그레이션 전 기존 DB 중복 확인 필요.
+2. `profileImg` 업로드 방식(URL vs 파일 업로드) 확인 필요.
+
+**테스트 관점** (`tests/test_mypage_*.py`, 신규)
+- 프로필·활동요약 조회, 프로필 수정 성공/`NICKNAME_DUPLICATE`.
+- 저장한 코스/내 후기/찜 목록 — 본인 데이터만 노출 확인.
+
+### 7.19 `home` 앱 상세 설계 (Stage 6 실행용, `feature/home`)
+
+> Notion "Home" 그룹 API spec 2개 확정 경로 근거. `authorization: none`.
+
+#### 7.19.1 엔드포인트
+
+**`GET /weather/current`** — query `lat`,`lng`: `{weatherType, temp, icon}`. 에러: `WEATHER_FETCH_FAILED`(502).
+
+**`GET /home`** — query `lat`,`lng`: `{weather:{type,temp,icon}, recommendedCourses:[{courseId,name,duration,distance,thumbnail}], unlockBanner:{available}}`. 에러: `WEATHER_FETCH_FAILED`(502).
+
+#### 7.19.2 서비스 로직
+
+- **날씨**: 기상청(KMA) 연동 — API 종류·좌표→격자 변환 미확정(미해결 사항 1). `home/kma.py` 어댑터로 분리, 실패 시 `WEATHER_FETCH_FAILED` 변환.
+- **추천 코스**: 선정 기준 미확정(미해결 사항 2).
+- **`unlockBanner.available`**: 요청 좌표 기준 아직 잠금 해제 안 된 `gamification.HiddenCourse` 존재 여부(`GET /courses/unlocked`의 `lockedCourses`와 같은 조회, 7.17.5) — `gamification`(Stage 5) 완료 선행 필요.
+
+**미해결 사항**
+1. 기상청 API 연동 방식 미확정.
+2. `recommendedCourses` 선정 기준 미확정.
+3. `courses`(Stage 3)·`gamification`(Stage 5) 의존 — `/weather/current`만 먼저 만들고 `/home`은 미루는 분할도 고려.
+
+**테스트 관점**: 현재 날씨 성공/실패(`WEATHER_FETCH_FAILED`), 메인 홈 데이터 필드 확인.
+
+### 7.20 `common` 앱 상세 설계 (Stage 6 실행용, `feature/common-settings`)
+
+> Notion "공통" 그룹 API spec 2개 확정 경로 근거.
+
+#### 7.20.1 모델
+
+**`UserSettings`**: `user`(`OneToOneField`), `push_notification_enabled`(응답 `notifications.push`), `golden_hour_notification_enabled`(응답 `notifications.goldenHour`, 정확한 정의 미해결 사항 1), `language`(choices `ko`/`en`/`ja`/`zh`), `location_permission_granted`(응답 `permissions.location` — OS 권한이 아니라 사용자 동의 값으로 해석, 미해결 사항 2).
+
+#### 7.20.2 엔드포인트
+
+**`GET /settings`**: `{notifications:{push,goldenHour}, language, permissions:{location}}`.
+
+**`PATCH /settings`**: 동일 구조 요청 → `{updated:true}`. `UserSettings.objects.get_or_create(user=request.user)`로 최초 접근 시 기본값 생성.
+
+**미해결 사항**
+1. `goldenHour` 알림 정확한 정의는 기능명세서 재확인 필요.
+2. `permissions.location`의 정확한 의미 재확인 필요.
+
+**테스트 관점**: 최초 접근 시 기본값 자동 생성, 설정 변경 각 필드 갱신 확인.
+
 ## 8. 단계별 구현 계획
 
 - **Stage 0** — Django 프로젝트 뼈대: `config/` 생성, MySQL 연결, 빈 상태로 `manage.py migrate`/`runserver` 동작 확인. 도메인 앱 없음.
 - **Stage 1** — `accounts` 앱: 6절 모델/엔드포인트 구현. `common` 앱의 응답 포맷/에러 핸들러도 이 단계에서 함께 구현 (auth가 이를 바로 사용하므로).
 - **Stage 2** — `places` 앱: `TouristSpot`/`TouristSpotImage` 모델과 통합 검색(`/search`)/장소 상세/관광지 예상 방문 집중도/실시간 교통 혼잡 안내 4개 API. TourAPI는 조회 시 로컬 write-through 캐시, 집중률은 관광공사 예측 API, 교통은 카카오모빌리티 Directions API를 사용한다.
-- **Stage 3** — `courses` 앱: `Course`/`CoursePlace`/`CourseProgress`. AI 추천·동선 최적화 연동은 별도 스테이지로 다시 분리 검토.
-- **Stage 4** — `reviews` + `interactions` 앱: `Review`/`ReviewHelpful`/`ReviewReport`, `Bookmark`.
-- **Stage 5** — `gamification` 앱: `RegionStamp`/`UserStamp`/`HiddenCourse`/`UserHiddenCourseUnlock`/`CompletionCard`.
-- **Stage 6** — `mypage` + `home` (조회 전용, 자체 모델 없음) + `common.UserSettings`.
+- **Stage 3** — `courses` 앱: `Course`/`CoursePlace`/`CourseProgress` 모델 + 저장/시작/완주인증/공유 API(`feature/courses-base`, **완료** — 7.12절) → AI 맞춤 추천(`feature/courses-recommend`, **완료** — 7.13절) → 동선 최적화(`feature/courses-optimize`, 7.14절, **다음 착수 대상**), 3개 이슈로 순서대로 진행(`docs/roadmap.md` 4절).
+- **Stage 4** — `reviews`(7.15절) + `interactions`(7.16절) 앱: `Review`/`ReviewPhoto`/`ReviewReaction`/`ReviewReport`, `Bookmark`(장소 전용).
+- **Stage 5** — `gamification` 앱(7.17절): `Stamp`/`HiddenCourse`/`UserHiddenCourseUnlock`/`CompletionCard`(`RegionStamp` 마스터 테이블 없음, 완주카드는 course 단위).
+- **Stage 6** — `mypage`(7.18절, `accounts.User`에 `profile_img` 필드·`nickname` unique 마이그레이션 추가 포함) + `home`(7.19절, 조회 전용, `courses`·`gamification` 완료 후 전체 구현 가능) + `common.UserSettings`(7.20절, 중첩 응답 구조).
 - **Stage 7** — 배포 준비: settings dev/prod 분리, Dockerfile, Nginx, CI(`.github/workflows/ci.yml`) 갱신.
 
 각 스테이지는 별도 커밋/PR 단위로 진행하고, 다음 스테이지로 넘어가기 전에 리뷰를 거친다.

@@ -66,6 +66,16 @@ class ErrorCode(Enum):
         500,
         "추천 생성에 실패했습니다.",
     )
+    MIN_PLACE_REQUIRED = (
+        "MIN_PLACE_REQUIRED",
+        400,
+        "장소를 2개 이상 선택해주세요.",
+    )
+    ROUTE_CALC_FAILED = (
+        "ROUTE_CALC_FAILED",
+        500,
+        "경로 계산에 실패했습니다.",
+    )
 
     def __init__(self, code: str, status_code: int, message: str):
         self.code = code

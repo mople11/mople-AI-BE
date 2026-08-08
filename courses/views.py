@@ -9,6 +9,8 @@ from courses.serializers import (
     AIRecommendRequestSerializer,
     CourseCompleteDataSerializer,
     CourseCompleteSerializer,
+    CourseOptimizeDataSerializer,
+    CourseOptimizeRequestSerializer,
     CoursesErrorResponseSerializer,
     CourseSaveDataSerializer,
     CourseShareDataSerializer,
@@ -16,6 +18,7 @@ from courses.serializers import (
 )
 from courses.services import (
     complete_course,
+    optimize_route,
     request_ai_recommendation,
     save_course,
     share_course,
@@ -63,6 +66,48 @@ AIRecommendResponse = inline_serializer(
         "error": serializers.JSONField(allow_null=True),
     },
 )
+CourseOptimizeResponse = inline_serializer(
+    "CourseOptimizeSuccess",
+    fields={
+        "success": serializers.BooleanField(),
+        "data": CourseOptimizeDataSerializer(),
+        "error": serializers.JSONField(allow_null=True),
+    },
+)
+
+
+class CourseOptimizeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="코스 동선 최적화",
+        operation_id="courses_optimize",
+        tags=["Courses"],
+        request=CourseOptimizeRequestSerializer,
+        responses={
+            200: CourseOptimizeResponse,
+            400: CoursesErrorResponseSerializer,
+            401: CoursesErrorResponseSerializer,
+            404: CoursesErrorResponseSerializer,
+            422: CoursesErrorResponseSerializer,
+            500: CoursesErrorResponseSerializer,
+        },
+    )
+    def post(self, request):
+        serializer = CourseOptimizeRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        result = optimize_route(
+            place_ids=serializer.validated_data["placeIds"],
+            transport=serializer.validated_data["transport"],
+        )
+        return ApiResponse(
+            data={
+                "orderedPlaces": result.ordered_place_ids,
+                "segmentTimes": result.segment_times,
+                "totalTime": result.total_time,
+                "route": result.route,
+            }
+        )
 
 
 class AIRecommendView(APIView):

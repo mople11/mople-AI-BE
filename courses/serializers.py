@@ -3,6 +3,22 @@ from rest_framework import serializers
 from common.exceptions import ApiError, ErrorCode
 
 
+class CourseOptimizeRequestSerializer(serializers.Serializer):
+    placeIds = serializers.ListField(
+        child=serializers.CharField(), max_length=8
+    )
+    transport = serializers.ChoiceField(
+        choices=["도보", "차량", "대중교통"], required=True
+    )
+
+
+class CourseOptimizeDataSerializer(serializers.Serializer):
+    orderedPlaces = serializers.ListField(child=serializers.CharField())
+    segmentTimes = serializers.ListField(child=serializers.IntegerField())
+    totalTime = serializers.IntegerField()
+    route = serializers.JSONField()
+
+
 class AIRecommendRequestSerializer(serializers.Serializer):
     mood = serializers.CharField(
         required=False, allow_blank=True, default="", max_length=50

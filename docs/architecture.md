@@ -1440,7 +1440,7 @@ urlpatterns = [
 
 > Notion "API spec" DB의 "후기·만족도" 그룹(엔드포인트 5개 확정)과 "데이터 모델링 (ERD)" 페이지 근거(`docs/roadmap.md` 5절).
 
-이번 스테이지 범위는 5개 전부다: **후기 작성**(`POST /reviews`), **후기 목록 조회**(`GET /reviews`, `authorization: none`), **후기 도움돼요**(`POST /reviews/{reviewId}/helpful`), **후기 신고**(`POST /reviews/{reviewId}/report`), **AI 만족도·키워드 요약**(`GET /reviews/summary`, `authorization: none`).
+`feature/reviews` 브랜치 범위는 4개다: **후기 작성**(`POST /reviews`), **후기 목록 조회**(`GET /reviews`, `authorization: none`), **후기 도움돼요**(`POST /reviews/{reviewId}/helpful`), **후기 신고**(`POST /reviews/{reviewId}/report`). **AI 만족도·키워드 요약**(`GET /reviews/summary`, `authorization: none`, 7.15.8절)은 AI 연동 방식이 미확정이라 별도 이슈·브랜치로 분리한다 — 이번 브랜치에서 구현하지 않는다.
 
 #### 7.15.1 `targetId` 대상 모호성 (착수 전 반드시 확인)
 
@@ -1548,7 +1548,7 @@ urlpatterns = [
 
 **미해결 사항**
 1. `targetId`가 코스 후기를 지원해야 하는지(7.15.1).
-2. "도움돼요" 토글 여부(7.15.6)는 이 문서의 가정.
+2. [확정] "도움돼요"는 토글 방식으로 동작한다(7.15.6).
 3. AI 만족도·키워드 요약의 실제 분석 로직/연동 대상 미정.
 4. Stage 4 완료 후 `places` 앱의 `avgRating`/`aiSatisfaction`/통합검색 `rating` 고정값을 실제 값으로 교체.
 5. `review_count` 캐시를 `TouristSpot`에 둘지 미정.

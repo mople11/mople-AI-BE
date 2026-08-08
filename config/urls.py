@@ -17,4 +17,5 @@ urlpatterns = [
     path("api/v1/courses/", include("courses.urls")),
     path("api/v1/recommend/ai", AIRecommendView.as_view(), name="recommend-ai"),
     path("", include("places.urls")),
+    path("", include("reviews.urls")),
 ]

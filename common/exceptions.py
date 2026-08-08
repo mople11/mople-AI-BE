@@ -76,6 +76,12 @@ class ErrorCode(Enum):
         500,
         "경로 계산에 실패했습니다.",
     )
+    RATING_REQUIRED = ("RATING_REQUIRED", 400, "별점을 선택해주세요.")
+    REVIEW_NOT_FOUND = (
+        "REVIEW_NOT_FOUND",
+        404,
+        "존재하지 않는 후기입니다.",
+    )
 
     def __init__(self, code: str, status_code: int, message: str):
         self.code = code

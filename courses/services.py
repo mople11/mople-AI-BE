@@ -1,3 +1,6 @@
+import itertools
+from dataclasses import dataclass
+
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
@@ -5,8 +8,80 @@ from django.utils import timezone
 from common.exceptions import ApiError, ErrorCode
 from courses.ai_recommend import AIRecommendClient, AIRecommendError
 from courses.models import Course, CoursePlace, CourseProgress
+from places.kakao_mobility import KakaoMobilityClient
 from places.models import TouristSpot
 from places.services import calculate_distance_km
+
+
+@dataclass(frozen=True)
+class OptimizedRoute:
+    ordered_place_ids: list[str]
+    segment_times: list[int]
+    total_time: int
+    route: dict
+
+
+def optimize_route(*, place_ids: list[str], transport: str) -> OptimizedRoute:
+    if len(place_ids) < 2:
+        raise ApiError(ErrorCode.MIN_PLACE_REQUIRED)
+
+    try:
+        pks = [int(place_id) for place_id in place_ids]
+    except ValueError as exc:
+        raise ApiError(ErrorCode.PLACE_NOT_FOUND) from exc
+
+    spots_by_pk = {
+        spot.pk: spot
+        for spot in TouristSpot.objects.filter(pk__in=pks)
+    }
+    try:
+        coords = [
+            (spots_by_pk[pk].latitude, spots_by_pk[pk].longitude)
+            for pk in pks
+        ]
+    except KeyError as exc:
+        raise ApiError(ErrorCode.PLACE_NOT_FOUND) from exc
+
+    duration_matrix = _build_duration_matrix(coords)
+    if duration_matrix is None:
+        raise ApiError(ErrorCode.ROUTE_CALC_FAILED)
+
+    best_order = _shortest_path_order(duration_matrix)
+    segment_times = [
+        duration_matrix[best_order[i]][best_order[i + 1]]
+        for i in range(len(best_order) - 1)
+    ]
+    return OptimizedRoute(
+        ordered_place_ids=[place_ids[i] for i in best_order],
+        segment_times=segment_times,
+        total_time=sum(segment_times),
+        route={},
+    )
+
+
+def _build_duration_matrix(coords: list[tuple]) -> list[list[int]] | None:
+    client = KakaoMobilityClient()
+    n = len(coords)
+    matrix = [[0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            traffic = client.get_traffic(origin=coords[i], destination=coords[j])
+            if traffic is None:
+                return None
+            matrix[i][j] = traffic.eta_min
+    return matrix
+
+
+def _shortest_path_order(matrix: list[list[int]]) -> list[int]:
+    n = len(matrix)
+    best_order, best_total = None, None
+    for perm in itertools.permutations(range(n)):
+        total = sum(matrix[perm[i]][perm[i + 1]] for i in range(n - 1))
+        if best_total is None or total < best_total:
+            best_order, best_total = perm, total
+    return list(best_order)
 
 
 def request_ai_recommendation(

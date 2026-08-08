@@ -1263,44 +1263,178 @@ path("api/v1/recommend/ai", AIRecommendView.as_view(), name="recommend-ai"),
 - 인증 없이 호출: `AUTH_401`.
 - **회귀**: 이 API로 생성한 `Course`/`CoursePlace`에 대해 `POST /courses/{courseId}/save`·`/start`·`/complete`·`/share`(7.12절, `feature/courses-base`)를 순서대로 호출해 전부 기존과 동일하게 동작하는지 확인.
 
-### 7.14 `courses` 앱 상세 설계 (Stage 3-③ 실행용, `feature/courses-optimize`)
+### 7.14 `courses` 앱 상세 설계 (Stage 3-③ 실행용, `feature/courses-optimize`, GitHub 이슈 #20 기준)
 
-> Notion API spec "코스 동선 최적화"(`d0904d374d2782a68116012c2f5c894f`) 페이지 근거.
+> Notion API spec "코스 동선 최적화"(`d0904d374d2782a68116012c2f5c894f`) 페이지 근거. `Course`/`CoursePlace` 모델은 `feature/courses-base`(#15)에서 이미 존재하며, 이번 브랜치는 새 모델 없이 `courses` 앱에 엔드포인트 1개만 추가한다(이슈 #20 범위).
 
 #### 7.14.1 에러 코드
 
 | 코드 | 상태코드 | 메시지 | 발생 조건 |
 |---|---|---|---|
 | `MIN_PLACE_REQUIRED` | 400 | 장소를 2개 이상 선택해주세요. | `placeIds`가 2개 미만 |
-| `ROUTE_CALC_FAILED` | 500 | 경로 계산에 실패했습니다. | 카카오 로컬 API 호출/파싱 실패 |
+| `ROUTE_CALC_FAILED` | 500 | 경로 계산에 실패했습니다. | `KakaoMobilityClient` 호출/파싱 실패(내부적으로 `get_traffic`이 `None`을 반환하는 모든 경우, 7.14.3) |
 
-#### 7.14.2 `POST /courses/optimize`
+`PLACE_NOT_FOUND`(404)는 새로 추가하지 않는다 — `placeIds` 중 로컬 `TouristSpot`으로 존재하지 않는 값이 있을 때 Stage 2(`places` 앱, 7.11.4)의 기존 코드를 그대로 재사용한다(7.15.3의 재사용 판단과 동일한 근거).
 
-**요청**
+#### 7.14.2 `POST /api/v1/courses/optimize`
+
+**요청** (`CourseOptimizeRequestSerializer`, `permission_classes = [IsAuthenticated]` — Notion `authorization: required`)
+
 ```json
 { "placeIds": ["string"], "transport": "도보|차량|대중교통" }
 ```
 
-**서비스 로직** (`optimize_route`)
-1. `placeIds`가 2개 미만이면 `MIN_PLACE_REQUIRED`.
-2. `places.kakao_mobility.KakaoMobilityClient`(Stage 2에서 이미 도입, 실시간 교통 혼잡 안내용)를 재사용해 최적 방문 순서와 구간별 소요시간을 계산한다. 실패 시 `ROUTE_CALC_FAILED`.
+| 필드 | DRF 필드 | 비고 |
+|---|---|---|
+| `placeIds` | `ListField(child=CharField(), max_length=8)` | 로컬 `TouristSpot` PK를 문자열로 담은 배열(7.11.6/7.13.3과 동일하게 응답에서도 로컬 PK를 그대로 쓰되, 이 엔드포인트는 요청에서도 Notion 타입(`"string"`)을 그대로 따른다 — 서비스 계층에서 `int()`로 변환해 조회). 2개 미만 여부는 시리얼라이저가 아니라 `optimize_route`가 검증한다(`MOOD_REQUIRED`와 같은 이유, 7.13.3) — `MIN_PLACE_REQUIRED`라는 도메인 에러 코드가 필요하기 때문에 `min_length`로 걸러 일반 `COMMON_422`를 내보내지 않는다. **상한(`max_length=8`)은 Notion 명세에 없는 값이며, 코드 리뷰에서 지적된 리스크(아래)를 근거로 의도적으로 추가한 제약이다** — 초과 시 DRF 기본 동작대로 `COMMON_422` |
+| `transport` | `ChoiceField(choices=["도보","차량","대중교통"], required=True)` | 값 검증만 하고 이번 스테이지 계산 로직에는 반영하지 않는다 — 이유는 7.14.3 참고. 허용값 외 요청은 `COMMON_422` |
+
+**`placeIds` 상한을 8개로 제한하는 이유(0절 원칙 2 예외 — 명세 확장이 아니라 제한이므로 근거를 남긴다)**: `optimize_route`는 `n*(n-1)`회의 순차 외부 API 호출과 `n!` 순열 전수 탐색(7.14.3)을 수행한다. 상한이 없으면 실존하는 `placeId`를 10개 이상 나열하는 것만으로(`places` 앱이 이미 수십~수백 건을 캐시하고 있어 어렵지 않다) 요청 하나가 워커를 몇 분 이상 점유할 수 있다는 것이 코드 리뷰에서 확인됐다(직접 측정: `n=12`일 때 순열 생성만 약 4.8억 개). 이는 정상적인 사용 패턴(장소가 많은 하루 코스)에서도 발생할 수 있는 서비스 지연/장애 위험이라 판단해, `freeText` 500자 제한(7.13.3, "LLM 비용·지연 남용 방지")과 같은 성격의 안전장치로 8을 채택했다. 8이라는 값 자체는 실제 프론트 UX(코스당 평균 장소 수)로 확정된 것이 아니므로 조정 가능한 잠정값으로 취급한다(7.14.7 미해결 사항).
 
 **응답 `200`**
+
 ```json
 { "success": true, "data": { "orderedPlaces": ["3", "1", "2"], "segmentTimes": [12, 8], "totalTime": 20, "route": {} }, "error": null }
 ```
 
-**중요한 미확정 지점**: 요청 바디에 `courseId`가 없다 — `Course`에 묶이지 않은 순수 계산 API이고, 응답을 실제 `CoursePlace.order`/`travel_time_from_prev`에 반영하는 저장 엔드포인트가 Notion 명세에 없다. 이번 브랜치는 **계산 결과만 응답하고 저장하지 않는다**. 프론트가 이 결과로 무엇을 하는지는 착수 전 확인 필요(7.14.4 미해결 사항 1).
+`orderedPlaces`는 입력 `placeIds`를 최적 순서로 재배열한 문자열 배열(요청에서 받은 문자열을 그대로 반환 — 로컬 PK로 왕복 변환하지 않는다), `segmentTimes`는 `orderedPlaces` 기준 인접 구간 소요시간(분) 배열로 길이는 항상 `len(placeIds) - 1`, `totalTime`은 `segmentTimes`의 합. `route`는 Notion 명세에 `{}` 외 구체 필드가 없어 이번 스테이지는 항상 빈 객체로 고정한다(7.14.7 미해결 사항 참고).
 
-#### 7.14.3 테스트 관점
+**중요한 미확정 지점**: 요청 바디에 `courseId`가 없다 — `Course`에 묶이지 않은 순수 계산 API이고, 응답을 실제 `CoursePlace.order`/`travel_time_from_prev`에 반영하는 저장 엔드포인트가 Notion 명세에 없다. 이번 브랜치는 **계산 결과만 응답하고 저장하지 않는다**(이슈 #20 완료조건 "CoursePlace를 직접 수정하지 않는지 확인"). 프론트가 이 결과로 무엇을 하는지는 착수 전 확인 필요(7.14.7 미해결 사항 1).
 
-- 성공 — `placeIds` 2개 이상: `orderedPlaces`/`segmentTimes`/`totalTime` 응답 확인. `KakaoMobilityClient`는 mock.
-- 실패 — `placeIds` 1개: `MIN_PLACE_REQUIRED`, 400.
-- 실패 — 카카오 API mock 실패: `ROUTE_CALC_FAILED`, 500.
+#### 7.14.3 동선 최적화 알고리즘 및 `KakaoMobilityClient` 재사용
 
-#### 7.14.4 미해결 사항
+**`transport` 값을 계산에 반영하지 않는 이유**: `places/kakao_mobility.py`의 `KakaoMobilityClient`(Stage 2에서 이미 구현)는 카카오모빌리티 **자동차 길찾기(Directions) API**만 감싼 어댑터이고, 도보·대중교통 경로를 계산하는 API는 이 프로젝트에 아직 연동돼 있지 않다. 이슈 #20이 "`KakaoMobilityClient`(Stage 2에서 이미 구현) 재사용"을 명시적으로 지시하므로, 이번 스테이지는 `transport` 값과 무관하게 항상 자동차 기준 소요시간으로 계산한다. 도보/대중교통 전용 API 연동은 명세에 없는 새 외부 연동을 임의로 추가하는 것이라 이번 브랜치 범위 밖으로 남긴다(0절 원칙 2, 7.14.7 미해결 사항 2). `transport` 필드 자체는 요청 계약대로 받아 값 검증(`ChoiceField`)만 수행한다.
+
+**문제 정의**: `placeIds`로 주어진 장소들을 방문하는 **경로(왕복이 아닌 편도, order 없는 임의 시작점)** 중 총 이동 시간이 최소인 순서를 찾는다. 카카오모빌리티 Directions API는 두 지점 간 경로만 계산하므로(다중 목적지 최적화 API 없음), 모든 지점 쌍의 이동 시간을 먼저 구한 뒤 순서를 자체적으로 탐색해야 한다.
+
+**서비스 로직** (`courses/services.py`, `optimize_route`)
+
+```python
+@dataclass(frozen=True)
+class OptimizedRoute:
+    ordered_place_ids: list[str]
+    segment_times: list[int]
+    total_time: int
+    route: dict
+
+
+def optimize_route(*, place_ids: list[str], transport: str) -> OptimizedRoute:
+    if len(place_ids) < 2:
+        raise ApiError(ErrorCode.MIN_PLACE_REQUIRED)
+
+    try:
+        pks = [int(place_id) for place_id in place_ids]
+    except ValueError as exc:
+        raise ApiError(ErrorCode.PLACE_NOT_FOUND) from exc
+
+    spots_by_pk = {
+        spot.pk: spot
+        for spot in TouristSpot.objects.filter(pk__in=pks)
+    }
+    try:
+        coords = [
+            (spots_by_pk[pk].latitude, spots_by_pk[pk].longitude)
+            for pk in pks
+        ]
+    except KeyError as exc:
+        raise ApiError(ErrorCode.PLACE_NOT_FOUND) from exc
+
+    duration_matrix = _build_duration_matrix(coords)
+    if duration_matrix is None:
+        raise ApiError(ErrorCode.ROUTE_CALC_FAILED)
+
+    best_order = _shortest_path_order(duration_matrix)
+    segment_times = [
+        duration_matrix[best_order[i]][best_order[i + 1]]
+        for i in range(len(best_order) - 1)
+    ]
+    return OptimizedRoute(
+        ordered_place_ids=[place_ids[i] for i in best_order],
+        segment_times=segment_times,
+        total_time=sum(segment_times),
+        route={},
+    )
+
+
+def _build_duration_matrix(coords: list[tuple]) -> list[list[int]] | None:
+    client = KakaoMobilityClient()
+    n = len(coords)
+    matrix = [[0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            traffic = client.get_traffic(origin=coords[i], destination=coords[j])
+            if traffic is None:
+                return None
+            matrix[i][j] = traffic.eta_min
+    return matrix
+
+
+def _shortest_path_order(matrix: list[list[int]]) -> list[int]:
+    n = len(matrix)
+    best_order, best_total = None, None
+    for perm in itertools.permutations(range(n)):
+        total = sum(matrix[perm[i]][perm[i + 1]] for i in range(n - 1))
+        if best_total is None or total < best_total:
+            best_order, best_total = perm, total
+    return list(best_order)
+```
+
+**정정(코드 리뷰 반영)**: 최초 초안은 `placeIds`를 `dict`(`{place_id: int(place_id) ...}`)로 변환해 조회했다. 이 방식은 중복된 `placeId`가 들어오면 키가 조용히 합쳐져 `coords`의 길이가 원본 `place_ids`보다 짧아지고, 이후 `ordered_place_ids=[place_ids[i] for i in best_order]`가 짧아진 인덱스로 원본(길이가 다른) 리스트를 참조해 **응답에서 장소가 조용히 사라지거나 중복 표시되는 버그**로 이어진다는 것이 코드 리뷰에서 확인됐다(예: `place_ids=["5","5","9"]` → 응답이 `["5","5"]`가 되어 `"9"`가 유실됨). 위 코드는 `dict` 대신 `list`(`pks`)를 그대로 써서 `place_ids`/`pks`/`coords`가 항상 같은 길이·같은 순서를 유지하도록 수정한 버전이다. 중복 `placeId` 자체를 막는 검증은 여전히 추가하지 않는다 — 이번 방식에서는 같은 장소를 두 번 방문하는 것으로 자연스럽게 계산될 뿐 에러가 되지 않는다(0절 원칙 2, 이 부분은 최초 의도와 동일).
+
+- `_build_duration_matrix`는 지점 쌍마다 `KakaoMobilityClient.get_traffic`을 호출하므로 API 호출 횟수는 `n * (n - 1)`이다(방향성 고려 — 카카오 자동차 경로는 일방통행 등으로 왕복 시간이 다를 수 있어 대칭으로 가정하지 않는다). 호출 하나라도 `None`을 반환하면(내부적으로 `requests.RequestException`/파싱 실패를 이미 삼키고 `None`을 반환하는 기존 구현, `places/kakao_mobility.py`) 즉시 계산을 중단하고 `ROUTE_CALC_FAILED`로 처리한다 — 이미 성공한 나머지 쌍의 호출 결과는 버린다(부분 결과로 최적화하지 않음).
+- `_shortest_path_order`는 순열 전수 탐색(편도 경로, 시작점 고정 없음)이다. `placeIds` 상한이 8(7.14.2)로 정해져 있어 최악의 경우도 순열 40,320개 × 비교 연산으로 무시할 수준이고, `_build_duration_matrix`의 외부 API 호출도 최대 `8*7=56`회로 유한하다. 다만 56회 호출이 전부 순차적으로 실행되는 것은 여전히 응답 지연 요인이다 — 병렬 호출(예: `ThreadPoolExecutor`)로 개선하는 것은 이번 브랜치 범위 밖으로 남긴다(7.14.7 미해결 사항 3).
+- `KakaoMobilityClient`(`places/kakao_mobility.py`)는 변경하지 않는다 — 기존 `get_traffic(origin, destination) -> TrafficData | None` 시그니처를 그대로 재사용한다(이슈 #20 지시, 0절 원칙 3).
+
+#### 7.14.4 URL 등록
+
+`courses/urls.py`(prefix `api/v1/courses/`)에 한 줄만 추가한다 — `<int:courseId>` 컨버터는 숫자만 매칭하므로 `optimize`라는 고정 세그먼트와 경로 충돌이 없다.
+
+```python
+# courses/urls.py
+urlpatterns = [
+    path("optimize", CourseOptimizeView.as_view(), name="optimize"),
+    path("<int:courseId>/save", CourseSaveView.as_view(), name="save"),
+    ...
+]
+```
+
+`CourseOptimizeView`는 `courses/views.py`에 다른 뷰와 같은 방식(`APIView`, `@extend_schema`)으로 추가한다.
+
+#### 7.14.5 테스트 관점 (`tests/test_courses_optimize.py`, 신규)
+
+`KakaoMobilityClient.get_traffic`을 mock 처리한다(`tests/test_kakao_mobility.py`와 동일한 방식). place는 fixture로 `TouristSpot` 2~3개를 미리 생성한다.
+
+- 성공 — `placeIds` 3개: mock으로 지점 쌍별 `eta_min`을 다르게 반환시켜, 총 이동 시간이 최소인 순서로 `orderedPlaces`가 나오는지, `segmentTimes` 길이가 `len(placeIds) - 1`인지, `totalTime`이 `segmentTimes` 합과 같은지 확인.
+- 성공 — `placeIds` 2개: `segmentTimes` 길이 1, `orderedPlaces`가 입력 2개의 순열 중 하나인지 확인.
+- 실패 — `placeIds` 1개(또는 0개): `MIN_PLACE_REQUIRED`, 400.
+- 실패 — `placeIds`에 로컬 `TouristSpot`으로 존재하지 않는 값 포함: `PLACE_NOT_FOUND`, 404.
+- 실패 — `KakaoMobilityClient.get_traffic`이 mock에서 `None` 반환(지점 쌍 중 하나라도): `ROUTE_CALC_FAILED`, 500.
+- 실패 — `transport`에 허용되지 않은 값: `COMMON_422`.
+- 인증 없이 호출: `AUTH_401`.
+- **계산 전용 확인**: 성공 케이스 실행 전후로 `CoursePlace.objects.count()`가 변하지 않는지 확인(이슈 #20 완료조건 "CoursePlace를 직접 수정하지 않는지").
+- **회귀(코드 리뷰 반영) — 중복 `placeId`**: 같은 `placeId`를 두 번 포함한 요청이 원본 개수와 동일한 길이의 `orderedPlaces`를 반환하고, 응답에 원본 `placeIds`의 모든 값이 그대로 포함되는지 확인(인덱스 정합성 회귀 방지, 위 정정 참고).
+- **회귀(코드 리뷰 반영) — `placeIds` 상한 초과**: `placeIds`가 9개 이상이면 `COMMON_422`인지 확인.
+
+#### 7.14.6 완료 조건 매핑 (이슈 #20)
+
+| 완료 조건 | 대응 |
+|---|---|
+| `POST /api/v1/courses/optimize`가 명세대로 응답 | 7.14.2 |
+| `placeIds` 2개 미만 → `MIN_PLACE_REQUIRED`, 400 | 7.14.1, 7.14.3 |
+| `KakaoMobilityClient` 호출 실패 → `ROUTE_CALC_FAILED`, 500 | 7.14.1, 7.14.3 |
+| 응답에 `orderedPlaces`/`segmentTimes`/`totalTime`/`route` 포함 | 7.14.2 |
+| `CoursePlace`를 직접 수정하지 않음 | 7.14.2(계산 전용), 7.14.5 회귀 확인 |
+| pytest 전체 통과 | 7.14.5 |
+
+#### 7.14.7 미해결 사항
 
 1. 동선 최적화 결과를 실제 `CoursePlace`에 반영하는 흐름이 명세에 없다(7.14.2) — 프론트 연동 방식 확인 필요.
+2. `transport`(도보/대중교통) 전용 경로 API 미연동 — 현재는 `transport` 값과 무관하게 자동차 기준으로만 계산한다(7.14.3). 실제로 도보/대중교통 소요시간이 필요해지면 별도 외부 API 연동을 검토한다.
+3. `_build_duration_matrix`의 최대 56회(`8*7`) 호출이 여전히 순차 실행이다(7.14.3) — 병렬 호출(`ThreadPoolExecutor` 등)로 응답 지연을 줄이는 것은 코드 리뷰에서 제안됐으나 이번 승인 범위(인덱스 정합성 수정 + 상한 추가)에는 포함하지 않았다. 운영 중 지연이 문제가 되면 별도로 착수한다.
+4. `route` 필드는 Notion 명세에 `{}` 외 구체 구조가 없어 항상 빈 객체로 응답한다(7.14.2) — 프론트가 실제로 필요한 데이터(예: 폴리라인, 좌표열)가 확인되면 채운다.
+5. `placeIds` 상한 `8`(7.14.2)은 코드 리뷰에서 제안된 잠정값이며 Notion 명세에 없다 — 실제 프론트에서 코스당 선택 가능한 장소 수 UX가 확정되면 값을 재검토한다.
 
 ### 7.15 `reviews` 앱 상세 설계 (Stage 4 실행용, `feature/reviews`)
 

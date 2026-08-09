@@ -1643,16 +1643,16 @@ ERD `card_type` 기준 UNIQUE는 채택하지 않는다 — API 계약 전체가
 
 **`GET /cards`**: `{cards:[{cardId, courseName, date, imageUrl}]}`.
 
-**`POST /cards/{cardId}/share`**: 코스 공유(7.12.3 `share_course`)와 동일한 패턴 — 저장 없이 URL만 생성. 전용 에러코드 없어 존재하지 않는 `cardId`는 공통 404 처리(미해결 사항 6).
+**`POST /cards/{cardId}/share`**: 저장 없이 URL만 생성한다는 점은 코스 공유(7.12.3 `share_course`)와 같지만, 소유자 검증이 있다는 점은 다르다 — 7.17.8에서 리뷰 결과로 확정(요청 사용자의 카드가 아니면 공통 404). 전용 에러코드는 두지 않는다(미해결 사항 6).
 
 #### 7.17.6 미해결 사항
 
 1. `Stamp.city_code` 코드 체계 미확정. **[해결, 7.17.7]**
 2. 좌표→시군 판별(reverse geocoding) 방식 미확정. **[해결, 7.17.7]**
 3. `GET /stamps`의 `progress` 단위(퍼센트 vs 비율) 가정. **[해결, 7.17.7]**
-4. `GET /courses/unlocked`의 "주변" 반경 미확정.
-5. 완주 카드 이미지 합성 로직 미확정.
-6. 완주 카드 공유의 `cardId` 없음 케이스 전용 에러코드 여부 미정.
+4. `GET /courses/unlocked`의 "주변" 반경 미확정. **[해결, 7.17.8]**
+5. 완주 카드 이미지 합성 로직 미확정. **[해결, 7.17.8]**
+6. 완주 카드 공유의 `cardId` 없음 케이스 전용 에러코드 여부 미정. **[해결, 7.17.8]**
 
 **테스트 관점** (`tests/test_gamification_*.py`, 신규)
 - 체크인 성공/이미획득/`OUT_OF_REGION`.
@@ -1671,6 +1671,169 @@ ERD `card_type` 기준 UNIQUE는 채택하지 않는다 — API 계약 전체가
   - HTTP 실패·매칭 실패를 구분하지 않고 둘 다 `get_city_code`가 `None`을 반환하도록 통일했다 — 이슈 세부 작업 순서 5번이 "좌표→시군코드 변환 실패/매칭없음 시 OUT_OF_REGION"으로 두 경우를 같은 에러로 명시했기 때문이다.
 - **미해결 사항 3 [해결] — `progress` 단위.** 가정대로 퍼센트로 확정한다: `round(len(collected) / 22 * 100)`. 22는 `TOTAL_STAMP_COUNT` 상수로 고정한다(`SIGUNGU_NAME_TO_CODE`의 길이에서 파생시키지 않음 — "전남 22개 시군 완주"는 코드 목록과 별개로 고정된 도메인 사실이라, 목록이 바뀌어도 이 상수가 조용히 따라 바뀌면 안 된다).
 - 체크인 동시성은 `Stamp.objects.get_or_create(user=user, city_code=city_code)` 하나로 처리한다. `get_or_create`는 내부적으로 `IntegrityError` 재조회를 이미 포함하므로 `interactions.toggle_bookmark`(7.16.3)처럼 별도 `try/except IntegrityError`를 추가하지 않는다.
+
+### 7.17.8 숨겨진 여행지·완주 카드 상세 설계 (`feature/gamification-cards`)
+
+> 7.17.2~7.17.3에서 남겨둔 `HiddenCourse`/`UserHiddenCourseUnlock`/`CompletionCard` 모델 3종과 엔드포인트 4개(`GET /courses/unlocked`, `POST /cards/completion`, `GET /cards`, `POST /cards/{cardId}/share`)를 같은 `gamification` 앱에 추가한다(7.17.7의 예고대로, 0절 원칙 1). `Stamp`와는 독립된 서브도메인이라 이번 브랜치 코드는 `Stamp`를 참조하지 않는다. 근거는 Notion API spec "숨겨진 여행지(날씨 해금) 목록 조회"(`cc204d374d278226923e01e0e253afc0`)·"완주 카드 생성"(`6b404d374d2782789f3d01c250a9cfdd`)·"완주 카드 컬렉션 조회"(`48f04d374d278368b46e015a7e5f8ee6`)·"완주 카드 공유"(`1bc04d374d2782dd97968156d0993eb8`) 4개 페이지다. 이 4개 페이지의 실제 REQUEST/RESPONSE 예시를 착수 전에 재확인한 결과, 기존 7.17.5의 서술과 필드 단위까지 일치함을 확인했다 — 아래는 그 예시를 그대로 반영한 확정 스펙이다.
+
+**착수 전 결정 두 가지**(이슈에서 이미 확정, 근거만 기록):
+
+- **완주 카드 이미지 합성 안 함.** `cardImageUrl`은 요청의 `userPhoto`를 그대로 반환한다. 등급별 카드 템플릿 합성은 디자인 리소스가 없어 이번 스테이지 범위 밖이다 — 준비되면 별도 이슈(미해결 사항 5).
+- **"주변" 반경 필터링 안 함.** `GET /courses/unlocked`의 `lat`/`lng`는 Notion 계약상 필수 쿼리 파라미터라 시리얼라이저 검증은 하지만, 서비스 로직은 이 값을 사용하지 않는다 — 전남 22개 시군 전체가 이미 서비스 범위이므로 `HiddenCourse` 전체를 유저의 `UserHiddenCourseUnlock` 존재 여부로만 나눈다(미해결 사항 4). 반경 필터링이 실제로 필요해지면(예: 프론트가 "내 주변" 배지를 원함) 별도 이슈에서 `places.services.calculate_distance_km`(7.12.3에서도 재사용한 haversine 유틸)로 추가한다.
+
+#### 모델 (`gamification/models.py` 추가, 새 마이그레이션 1개)
+
+**`HiddenCourse`**
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `course` | `OneToOneField` to `courses.Course`, `on_delete=CASCADE` | 코스 1개당 숨겨진 여행지 설정 최대 1건 |
+| `rarity` | `CharField`, choices `LEGENDARY`/`RARE`/`UNCOMMON`/`COMMON` | `unlockedCourses[].rarity` |
+| `unlock_condition` | `TextField`, blank 허용 | `lockedCourses[].unlockCondition` — 사람이 읽는 조건 설명. 실제 조건 매칭(날씨/계절 등)을 자동 판정하는 로직은 이번 스테이지 범위 밖이다: `UserHiddenCourseUnlock` 레코드를 만드는 주체(관리자 수동 지정 또는 별도 배치)는 아직 없고, 이번 브랜치는 "이미 해금된 사람"과 "아직 해금 안 된 사람"을 나눠 보여주는 조회 API만 만든다 — Notion 계약에 해금 판정을 트리거하는 엔드포인트가 없다(0절 원칙 2). |
+
+**`UserHiddenCourseUnlock`**
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `user` | FK to `accounts.User`, `on_delete=CASCADE`, `related_name="hidden_course_unlocks"` | |
+| `hidden_course` | FK to `HiddenCourse`, `on_delete=CASCADE`, `related_name="unlocks"` | |
+| `unlocked_at` | `DateTimeField(auto_now_add=True)` | |
+
+`Meta.constraints = [UniqueConstraint(fields=["user", "hidden_course"])]`.
+
+**`CompletionCard`**
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `user` | FK to `accounts.User`, `on_delete=CASCADE`, `related_name="completion_cards"` | |
+| `course` | FK to `courses.Course`, `on_delete=CASCADE`, `related_name="completion_cards"` | |
+| `user_photo` | `URLField`, null/blank 허용 | 요청의 `userPhoto` |
+| `card_image_url` | `URLField` | 응답의 `cardImageUrl`. 이번 스테이지는 `user_photo`와 항상 같은 값 |
+| `created_at` | `DateTimeField(auto_now_add=True)` | `GET /cards` 응답의 `date` |
+
+`Meta.constraints = [UniqueConstraint(fields=["user", "course"])]` — "완주 한 코스당 카드 한 장", ERD `card_type` 기준 UNIQUE는 7.17.3에서 이미 기각.
+
+#### 에러 코드
+
+`COURSE_NOT_COMPLETED`(400, "완주하지 않은 코스입니다.")를 `common/exceptions.py`의 `ErrorCode`에 추가(7.17.4에 이미 정의돼 있었으나 코드에는 반영 전이었다). 전용 `CARD_NOT_FOUND`류 코드는 추가하지 않는다(미해결 사항 6, 아래).
+
+#### 서비스 계층 (`gamification/services.py` 추가)
+
+**`get_unlocked_courses(*, user) -> dict`**
+1. `HiddenCourse.objects.all()` 전체를 조회한다(반경 필터링 없음, 위 결정 참고).
+2. `UserHiddenCourseUnlock.objects.filter(user=user).values_list("hidden_course_id", flat=True)`로 이 유저가 해금한 `hidden_course_id` 집합을 구한다.
+3. 각 `HiddenCourse`를 그 집합에 있으면 `{"courseId": hc.course_id, "rarity": hc.rarity}`로 `unlockedCourses`에, 없으면 `{"courseId": hc.course_id, "unlockCondition": hc.unlock_condition}`로 `lockedCourses`에 담는다. `courseId`는 `hc.course_id`(코스 PK) — `hc.pk`(`HiddenCourse` 자체 PK)가 아니다, Notion 응답이 코스 단위이기 때문(7.17.1 상단 결정과 동일 원칙).
+4. `{"unlockedCourses": [...], "lockedCourses": [...]}` 반환.
+
+**`create_completion_card(*, user, course_id, user_photo) -> CompletionCard`**
+1. `courses.models.CourseProgress.objects.filter(user=user, course_id=course_id).first()`로 진행 기록을 조회한다. 기록이 없거나 `status != CourseProgress.Status.COMPLETED`면 `ApiError(ErrorCode.COURSE_NOT_COMPLETED)`. `courseId` 자체가 존재하지 않는 코스를 가리키는 경우도 자연히 이 분기로 걸러진다 — `Course.DoesNotExist`를 별도로 잡는 전용 404 처리는 추가하지 않는다(Notion 에러 코드 표에 `COURSE_NOT_FOUND`가 없다, 0절 원칙 2).
+2. `CompletionCard.objects.update_or_create(user=user, course_id=course_id, defaults={"user_photo": user_photo, "card_image_url": user_photo})` — 같은 코스로 재요청하면 사진만 갱신(멱등), `courses.services.save_course`(7.12.3)와 같은 upsert 패턴.
+3. 반환.
+
+**`share_completion_card(*, user, card_id) -> str`** — **[7.17.8 최초 확정 이후 코드 리뷰로 수정, 2026-08-10]** 최초 확정판은 `share_course`(7.12.3, 소유자 무관 공개 공유)와 동일 패턴으로 `card_id`만 받았으나, `CompletionCard`는 `Course`와 달리 `user_photo`(개인 사진)를 담은 개인 소유 리소스라는 점이 리뷰에서 지적됐다 — `card_id`가 순차 정수 PK라 소유자 검증이 없으면 로그인한 임의의 사용자가 남의 `cardId`를 넣어 존재 여부·`shareUrl`을 얻어갈 수 있는 IDOR이 된다. `courses.share_course`는 코스(공개돼도 무방한 여행 정보)를 다루므로 소유자 무관 설계가 맞지만, 완주 카드는 그 전제가 성립하지 않는다고 판단해 아래로 확정한다.
+1. `CompletionCard.objects.get(pk=card_id, user=user)` — 소유자 조건을 쿼리에 포함한다. 본인 카드가 아니거나 애초에 존재하지 않는 `card_id`나 동일하게 `DoesNotExist`가 발생하므로 `ApiError(ErrorCode.COMMON_404)`로 변환한다. **타인 카드의 존재 여부를 구분해서 알려주지 않는다** — "존재하지만 내 것이 아님"과 "존재하지 않음"을 다른 응답으로 구분하면 그 자체로 카드 존재 여부를 흘리는 사이드채널이 되므로, 두 경우 모두 동일한 404로 응답한다. 전용 에러코드를 새로 만들지 않고 기존 `COMMON_404`를 그대로 쓰는 결론(미해결 사항 6)은 유지 — Notion "완주 카드 공유" 페이지의 에러 코드 표가 "공통 에러 코드만 해당"이라고 명시하기 때문이다.
+2. `f"{settings.CARD_SHARE_BASE_URL}/{card.id}"` 반환. `COURSE_SHARE_BASE_URL`(7.12.6)을 그대로 재사용하지 않고 `CARD_SHARE_BASE_URL`을 새로 둔다 — 코스 공유 URL 경로(`/courses/{id}`)와 카드 공유 URL 경로(`/cards/{id}`)는 프론트 라우팅상 서로 다른 리소스라 값도 달라야 하기 때문이며, 선언 방식은 7.12.6과 완전히 동일한 패턴(placeholder, `.env.example`/`config/settings.py`에 한 쌍 추가)을 따른다.
+
+뷰(`CompletionCardShareView.post`)는 `share_completion_card(user=request.user, card_id=cardId)`로 호출한다 — 다른 3개 엔드포인트와 마찬가지로 `IsAuthenticated`만으로는 부족하고, 서비스 호출 시 반드시 `request.user`를 넘겨야 한다.
+
+```python
+# config/settings.py, COURSE_SHARE_BASE_URL 바로 아래
+CARD_SHARE_BASE_URL = env(
+    "CARD_SHARE_BASE_URL",
+    default="https://eodiganam.app/cards",
+)
+```
+
+```
+# .env.example, COURSE_SHARE_BASE_URL 바로 아래
+CARD_SHARE_BASE_URL=https://eodiganam.app/cards
+```
+
+**`GET /cards` 목록**은 서비스 함수를 따로 두지 않고 뷰에서 바로 조회한다(7.17.5의 `GET /stamps`처럼 단순 조회라 서비스 계층 분리가 과하다): `CompletionCard.objects.filter(user=request.user).select_related("course").order_by("-id")` — 최신 카드가 먼저 나오도록, `reviews.services`(7.15)의 기본 목록 정렬(`-id`)과 동일한 관례를 따른다.
+
+#### 시리얼라이저 (`gamification/serializers.py` 추가)
+
+```python
+class HiddenCourseUnlockedQuerySerializer(serializers.Serializer):
+    lat = serializers.FloatField(min_value=-90, max_value=90)
+    lng = serializers.FloatField(min_value=-180, max_value=180)
+
+
+class CompletionCardCreateSerializer(serializers.Serializer):
+    courseId = serializers.IntegerField()
+    userPhoto = serializers.URLField()
+```
+
+`lat`/`lng`는 `StampCheckinSerializer`(7.17절 기존 코드)와 동일한 범위 검증을 재사용하되, 서비스에는 전달하지 않는다(위 결정). 나머지 응답 필드는 `inline_serializer`로 뷰에 직접 선언한다 — `StampCheckinView`(기존 코드)와 동일한 관례.
+
+#### 뷰 (`gamification/views.py` 추가, 4개 전부 `IsAuthenticated`)
+
+| API | Endpoint | 뷰 |
+|---|---|---|
+| 숨겨진 여행지 목록 조회 | `GET /api/v1/courses/unlocked` | `HiddenCourseUnlockedView` |
+| 완주 카드 생성 | `POST /api/v1/cards/completion` | `CompletionCardCreateView` |
+| 완주 카드 컬렉션 조회 | `GET /api/v1/cards` | `CompletionCardListView` |
+| 완주 카드 공유 | `POST /api/v1/cards/{cardId}/share` | `CompletionCardShareView` |
+
+`CompletionCardListView`는 `select_related("course")`한 쿼리셋을 `{"cards": [{"cardId": c.id, "courseName": c.course.name, "date": c.created_at, "imageUrl": c.card_image_url} for c in ...]}` 형태로 직접 조립한다(별도 `ModelSerializer` 없이 `StampbookView`와 같은 관례).
+
+#### URL 등록 (`gamification/urls.py` 추가)
+
+4개 다 `gamification/urls.py`에 전체 경로(full path)로 직접 추가한다 — `courses/urls.py`(prefix `api/v1/courses/`, path param `<int:courseId>/...` 4개)를 건드리지 않는다. `HiddenCourse`는 `courses` 도메인이 아니라 `gamification` 도메인 소유이므로, 기존 `StampCheckinView`/`StampbookView`가 `api/v1/stamps/...` 전체 경로를 직접 선언한 것과 같은 관례를 그대로 따른다(0절 원칙 3 — 앱 경계를 지키기 위해 새 파일을 쪼개지 않되, `courses` 앱에 종속시키지도 않는다). `config/urls.py`의 `path("", include("gamification.urls"))`가 `path("api/v1/courses/", include("courses.urls"))`보다 뒤에 등록돼 있어도 문제없다 — Django `URLResolver`는 `include()`로 진입한 하위 패턴이 전부 매치 실패(`Resolver404`)하면 그 예외가 상위 루프까지 전파돼 다음 최상위 패턴(`gamification.urls`)으로 자연히 넘어간다. `unlocked`는 `courses.urls`의 `<int:courseId>/save`류 2세그먼트 패턴과 세그먼트 수 자체가 달라 오매치 걱정도 없다.
+
+```python
+urlpatterns = [
+    path("api/v1/stamps/checkin", StampCheckinView.as_view(), name="stamps-checkin"),
+    path("api/v1/stamps", StampbookView.as_view(), name="stamps-status"),
+    path("api/v1/courses/unlocked", HiddenCourseUnlockedView.as_view(), name="courses-unlocked"),
+    path("api/v1/cards/completion", CompletionCardCreateView.as_view(), name="cards-completion"),
+    path("api/v1/cards", CompletionCardListView.as_view(), name="cards-list"),
+    path("api/v1/cards/<int:cardId>/share", CompletionCardShareView.as_view(), name="cards-share"),
+]
+```
+
+#### 관리자 (`gamification/admin.py` 추가)
+
+`HiddenCourse`/`CompletionCard`를 `StampAdmin`과 같은 패턴으로 등록(`UserHiddenCourseUnlock`은 `HiddenCourse` 인라인으로 노출할 수도 있으나, 이번 스테이지는 최소한으로 모델 3개 다 개별 `ModelAdmin` 등록만 한다 — 인라인 편집 UX는 요구되지 않았다).
+
+#### 응답 예시 (Notion 원문 그대로)
+
+```json
+// GET /courses/unlocked
+{
+  "success": true,
+  "data": {
+    "unlockedCourses": [{ "courseId": 1, "rarity": "RARE" }],
+    "lockedCourses": [{ "courseId": 2, "unlockCondition": "비 오는 날 방문" }]
+  },
+  "error": null
+}
+```
+
+```json
+// POST /cards/completion  { "courseId": 1, "userPhoto": "https://..." }
+{ "success": true, "data": { "cardId": 1, "cardImageUrl": "https://..." }, "error": null }
+```
+
+```json
+// GET /cards
+{
+  "success": true,
+  "data": { "cards": [{ "cardId": 1, "courseName": "여수 밤바다 코스", "date": "2026-08-09T10:00:00Z", "imageUrl": "https://..." }] },
+  "error": null
+}
+```
+
+```json
+// POST /cards/{cardId}/share
+{ "success": true, "data": { "shareUrl": "https://eodiganam.app/cards/1" }, "error": null }
+```
+
+**테스트 관점** (`tests/test_gamification_cards.py`, 신규 — 7.17.7의 `test_gamification_stamps.py`와 분리)
+- 숨겨진 여행지 목록: 해금/미해금 fixture 각각 준비 후 `unlockedCourses`/`lockedCourses` 분리와 필드(`rarity` vs `unlockCondition`) 확인.
+- 완주 카드 생성: `CourseProgress.status=COMPLETED` fixture로 성공(`cardId`/`cardImageUrl=userPhoto` 확인) / 기록 없음·`SAVED`·`IN_PROGRESS` 각각 `COURSE_NOT_COMPLETED`(400) 확인 / 같은 코스 재요청 시 카드 upsert(행 1개 유지) 확인.
+- 완주 카드 컬렉션 조회: 본인 카드만 노출, `courseName`/`date`/`imageUrl` 필드 확인, 정렬(최신순) 확인.
+- 완주 카드 공유: 본인 카드 `shareUrl` 생성 확인 / 존재하지 않는 `cardId`는 404 / **타인 카드의 `cardId`를 넣어도 404**(소유자 검증, 2026-08-10 리뷰 반영) 확인.
 
 ### 7.18 `mypage` 앱 상세 설계 (Stage 6 실행용, `feature/mypage`)
 
@@ -1887,7 +2050,7 @@ path("api/v1/reviews/summary", ReviewSummaryView.as_view(), name="summary"),
 - **Stage 2** — `places` 앱: `TouristSpot`/`TouristSpotImage` 모델과 통합 검색(`/search`)/장소 상세/관광지 예상 방문 집중도/실시간 교통 혼잡 안내 4개 API. TourAPI는 조회 시 로컬 write-through 캐시, 집중률은 관광공사 예측 API, 교통은 카카오모빌리티 Directions API를 사용한다.
 - **Stage 3** — `courses` 앱: `Course`/`CoursePlace`/`CourseProgress` 모델 + 저장/시작/완주인증/공유 API(`feature/courses-base`, **완료** — 7.12절) → AI 맞춤 추천(`feature/courses-recommend`, **완료** — 7.13절) → 동선 최적화(`feature/courses-optimize`, 7.14절, **다음 착수 대상**), 3개 이슈로 순서대로 진행(`docs/roadmap.md` 4절).
 - **Stage 4** — `reviews`(7.15절, **완료**) + `interactions`(7.16절, **완료**) 앱: `Review`/`ReviewPhoto`/`ReviewReaction`/`ReviewReport`, `Bookmark`(장소 전용) → AI 만족도·키워드 요약(`feature/reviews-ai-summary`, 7.21절, **다음 착수 대상**).
-- **Stage 5** — `gamification` 앱(7.17절): `Stamp`/`HiddenCourse`/`UserHiddenCourseUnlock`/`CompletionCard`(`RegionStamp` 마스터 테이블 없음, 완주카드는 course 단위).
+- **Stage 5** — `gamification` 앱(7.17절): `Stamp`/`HiddenCourse`/`UserHiddenCourseUnlock`/`CompletionCard`(`RegionStamp` 마스터 테이블 없음, 완주카드는 course 단위). 위치 체크인/스탬프북(`feature/gamification-stamps`, **완료** — 7.17.7절) → 숨겨진 여행지/완주 카드(`feature/gamification-cards`, 7.17.8절, **다음 착수 대상**), 2개 이슈로 순서대로 진행.
 - **Stage 6** — `mypage`(7.18절, `accounts.User`에 `profile_img` 필드·`nickname` unique 마이그레이션 추가 포함) + `home`(7.19절, 조회 전용, `courses`·`gamification` 완료 후 전체 구현 가능) + `common.UserSettings`(7.20절, 중첩 응답 구조).
 - **Stage 7** — 배포 준비: settings dev/prod 분리, Dockerfile, Nginx, CI(`.github/workflows/ci.yml`) 갱신.
 

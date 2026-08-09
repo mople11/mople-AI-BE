@@ -6,6 +6,16 @@ class StampCheckinSerializer(serializers.Serializer):
     lng = serializers.FloatField(min_value=-180, max_value=180)
 
 
+class HiddenCourseUnlockedQuerySerializer(serializers.Serializer):
+    lat = serializers.FloatField(min_value=-90, max_value=90)
+    lng = serializers.FloatField(min_value=-180, max_value=180)
+
+
+class CompletionCardCreateSerializer(serializers.Serializer):
+    courseId = serializers.IntegerField()
+    userPhoto = serializers.URLField()
+
+
 class GamificationErrorResponseSerializer(serializers.Serializer):
     success = serializers.BooleanField()
     data = serializers.JSONField(allow_null=True)

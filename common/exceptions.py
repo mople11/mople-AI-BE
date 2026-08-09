@@ -55,6 +55,11 @@ class ErrorCode(Enum):
         404,
         "존재하지 않는 코스입니다.",
     )
+    COURSE_NOT_COMPLETED = (
+        "COURSE_NOT_COMPLETED",
+        400,
+        "완주하지 않은 코스입니다.",
+    )
     LOCATION_MISMATCH = (
         "LOCATION_MISMATCH",
         400,

@@ -20,3 +20,61 @@ class Stamp(models.Model):
                 name="gamification_stamp_user_city_code_unique",
             )
         ]
+
+
+class HiddenCourse(models.Model):
+    class Rarity(models.TextChoices):
+        LEGENDARY = "LEGENDARY", "LEGENDARY"
+        RARE = "RARE", "RARE"
+        UNCOMMON = "UNCOMMON", "UNCOMMON"
+        COMMON = "COMMON", "COMMON"
+
+    course = models.OneToOneField("courses.Course", on_delete=models.CASCADE)
+    rarity = models.CharField(max_length=9, choices=Rarity.choices)
+    unlock_condition = models.TextField(blank=True)
+
+
+class UserHiddenCourseUnlock(models.Model):
+    user = models.ForeignKey(
+        "accounts.User",
+        related_name="hidden_course_unlocks",
+        on_delete=models.CASCADE,
+    )
+    hidden_course = models.ForeignKey(
+        HiddenCourse,
+        related_name="unlocks",
+        on_delete=models.CASCADE,
+    )
+    unlocked_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "hidden_course"],
+                name="gamification_unlock_user_hidden_course_unique",
+            )
+        ]
+
+
+class CompletionCard(models.Model):
+    user = models.ForeignKey(
+        "accounts.User",
+        related_name="completion_cards",
+        on_delete=models.CASCADE,
+    )
+    course = models.ForeignKey(
+        "courses.Course",
+        related_name="completion_cards",
+        on_delete=models.CASCADE,
+    )
+    user_photo = models.URLField(null=True, blank=True)
+    card_image_url = models.URLField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "course"],
+                name="gamification_card_user_course_unique",
+            )
+        ]

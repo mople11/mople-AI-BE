@@ -82,6 +82,11 @@ class ErrorCode(Enum):
         404,
         "존재하지 않는 후기입니다.",
     )
+    OUT_OF_REGION = (
+        "OUT_OF_REGION",
+        400,
+        "해당 지역에서만 체크인할 수 있습니다.",
+    )
 
     def __init__(self, code: str, status_code: int, message: str):
         self.code = code

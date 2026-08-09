@@ -1647,9 +1647,9 @@ ERD `card_type` 기준 UNIQUE는 채택하지 않는다 — API 계약 전체가
 
 #### 7.17.6 미해결 사항
 
-1. `Stamp.city_code` 코드 체계 미확정.
-2. 좌표→시군 판별(reverse geocoding) 방식 미확정.
-3. `GET /stamps`의 `progress` 단위(퍼센트 vs 비율) 가정.
+1. `Stamp.city_code` 코드 체계 미확정. **[해결, 7.17.7]**
+2. 좌표→시군 판별(reverse geocoding) 방식 미확정. **[해결, 7.17.7]**
+3. `GET /stamps`의 `progress` 단위(퍼센트 vs 비율) 가정. **[해결, 7.17.7]**
 4. `GET /courses/unlocked`의 "주변" 반경 미확정.
 5. 완주 카드 이미지 합성 로직 미확정.
 6. 완주 카드 공유의 `cardId` 없음 케이스 전용 에러코드 여부 미정.
@@ -1660,6 +1660,17 @@ ERD `card_type` 기준 UNIQUE는 채택하지 않는다 — API 계약 전체가
 - 숨겨진 여행지 unlock 분리 확인.
 - 완주 카드 생성 성공/`COURSE_NOT_COMPLETED`.
 - 완주 카드 컬렉션 조회, 공유 확인.
+
+#### 7.17.7 위치 체크인/스탬프북 실행 결과 (`feature/gamification-stamps`)
+
+> 이 브랜치는 `gamification` 앱의 범위 중 `POST /stamps/checkin`·`GET /stamps` 2개 엔드포인트만 구현한다. 7.17.2~7.17.3의 숨겨진 여행지·완주 카드(모델 3종, 엔드포인트 4개)는 같은 앱에 추가할 후속 이슈로 남긴다(0절 원칙 1) — 7.17.6의 미해결 사항 4~6은 그 이슈에서 다룬다.
+
+- **미해결 사항 1 [해결] — `Stamp.city_code` 코드 체계.** 새 코드 체계를 만들지 않고 `places/tourist_congestion.py`의 `SIGUNGU_NAME_TO_CODE`(전남 22개 시군 이름→법정동코드 앞5자리, 예: `"여수시": "46130"`)를 그대로 재사용한다 — 이미 관광지 혼잡도 연동(7.11)에서 검증된 전남 22개 시군 매핑이라 새 코드 체계를 도입하는 것은 불필요한 재구현이다(0절 원칙 3). `Stamp.city_code`의 `choices`는 `[(code, name) for name, code in SIGUNGU_NAME_TO_CODE.items()]`로 구성한다(`gamification/models.py`). `places/tourapi.py`에도 이름은 같지만 코드 값이 다른 별도의 `SIGUNGU_CODE_TO_NAME`(TourAPI 자체 코드, `"1".."24"`)이 있으므로 혼동하지 않는다 — 이번 재사용 대상은 `tourist_congestion.py` 쪽(법정동코드, 카카오 로컬 API 응답과 호환)이다.
+- **미해결 사항 2 [해결] — reverse geocoding 방식.** 카카오 로컬 API `좌표로 행정구역정보 받기`(`GET https://dapi.kakao.com/v2/local/geo/coord2regioncode.json`)를 `gamification/kakao_local.py`의 `KakaoLocalClient`로 새로 감싼다. 인증은 기존 `settings.KAKAO_REST_API_KEY`(계정 소셜 로그인용으로 이미 선언돼 있었으나 미사용이던 값)를 그대로 쓰고, 새 API 키·env를 추가하지 않는다(이슈 지시). `KakaoMobilityClient`(7.14.3)처럼 base_url/timeout을 `settings`로 노출하는 대신 이번엔 모듈 상수로 고정했다 — "신규 env 없음" 지시를 코드로 강제하기 위함이며, 다른 카카오 어댑터와 달리 이 엔드포인트는 변경될 일이 없는 고정 API 경로라 설정으로 뺄 이유가 약하다.
+  - 응답의 `documents` 중 `region_type: "B"`(법정동) 문서만 사용하고, `region_1depth_name`이 `"전라남도"`가 아니거나 `region_2depth_name`이 `SIGUNGU_NAME_TO_CODE`에 없으면 매칭 실패로 취급한다.
+  - HTTP 실패·매칭 실패를 구분하지 않고 둘 다 `get_city_code`가 `None`을 반환하도록 통일했다 — 이슈 세부 작업 순서 5번이 "좌표→시군코드 변환 실패/매칭없음 시 OUT_OF_REGION"으로 두 경우를 같은 에러로 명시했기 때문이다.
+- **미해결 사항 3 [해결] — `progress` 단위.** 가정대로 퍼센트로 확정한다: `round(len(collected) / 22 * 100)`. 22는 `TOTAL_STAMP_COUNT` 상수로 고정한다(`SIGUNGU_NAME_TO_CODE`의 길이에서 파생시키지 않음 — "전남 22개 시군 완주"는 코드 목록과 별개로 고정된 도메인 사실이라, 목록이 바뀌어도 이 상수가 조용히 따라 바뀌면 안 된다).
+- 체크인 동시성은 `Stamp.objects.get_or_create(user=user, city_code=city_code)` 하나로 처리한다. `get_or_create`는 내부적으로 `IntegrityError` 재조회를 이미 포함하므로 `interactions.toggle_bookmark`(7.16.3)처럼 별도 `try/except IntegrityError`를 추가하지 않는다.
 
 ### 7.18 `mypage` 앱 상세 설계 (Stage 6 실행용, `feature/mypage`)
 

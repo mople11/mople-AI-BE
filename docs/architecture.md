@@ -1549,8 +1549,8 @@ urlpatterns = [
 **미해결 사항**
 1. `targetId`가 코스 후기를 지원해야 하는지(7.15.1).
 2. [확정] "도움돼요"는 토글 방식으로 동작한다(7.15.6).
-3. AI 만족도·키워드 요약의 실제 분석 로직/연동 대상 미정.
-4. Stage 4 완료 후 `places` 앱의 `avgRating`/`aiSatisfaction`/통합검색 `rating` 고정값을 실제 값으로 교체.
+3. [해결] AI 만족도·키워드 요약의 실제 분석 로직/연동 대상 — 7.21절(`feature/reviews-ai-summary`)에서 확정.
+4. `places` 앱의 `avgRating`/`aiSatisfaction`/통합검색 `rating` 고정값 교체는 **7.21절에 포함하지 않고 별도 후속 이슈로 분리한다**(7.21.6).
 5. `review_count` 캐시를 `TouristSpot`에 둘지 미정.
 
 **테스트 관점** (`tests/test_reviews_*.py`, 신규)
@@ -1742,13 +1742,140 @@ ERD `card_type` 기준 UNIQUE는 채택하지 않는다 — API 계약 전체가
 
 **테스트 관점**: 최초 접근 시 기본값 자동 생성, 설정 변경 각 필드 갱신 확인.
 
+### 7.21 `reviews` 앱 AI 만족도·키워드 요약 상세 설계 (`feature/reviews-ai-summary`)
+
+> Notion "AI 만족도·키워드 요약"(`00504d374d27826496f481a2e8f4e0c1`) 페이지 근거. 7.15에서 "AI 연동 방식 미확정"을 이유로 분리해 둔 `GET /reviews/summary` 1개 엔드포인트를 이번 브랜치에서 구현한다. 새 모델은 캐시 테이블(7.21.3) 하나뿐이고, `targetId` 해석은 7.15.1과 동일하게 `TouristSpot` PK다.
+
+#### 7.21.1 AI 연동 방식 결정 (착수 전 필수 결정)
+
+- **[해결] 외부 LLM 재사용.** `courses/ai_recommend.py`(7.13.4)와 동일하게 OpenAI 호환 Chat Completions API를 `requests`로 직접 호출한다. `courses` 앱을 위해 이미 도입된 `LLM_API_BASE_URL`/`LLM_API_KEY`/`LLM_API_MODEL`/`LLM_API_TIMEOUT_SEC` 환경변수를 그대로 재사용하므로 `.env.example`/`config/settings.py` 변경이 없다. 자체 키워드 사전 방식(대안 A)은 채택하지 않는다 — 한국어 형태소 처리 없이는 품질이 낮고, 이미 검증된 어댑터 패턴이 있는데 별도 방식을 새로 들이는 것은 불필요한 재구현이다(0절 원칙 3).
+- **[해결] 캐시 도입.** 리뷰가 적은 장소에서 매 요청마다 LLM을 호출하면 비용·지연이 크므로, 7.21.3의 `ReviewSummaryCache`로 재계산 빈도를 제한한다.
+
+#### 7.21.2 `reviews/ai_summary.py` — AI 어댑터
+
+`places/tourapi.py`·`courses/ai_recommend.py`와 같은 자리 규칙(7.13.4)의 외부 연동 어댑터다.
+
+```python
+class AISummaryError(Exception):
+    pass
+
+@dataclass(frozen=True)
+class ReviewSummaryResult:
+    score: int              # 0~100
+    positive: list[str]
+    negative: list[str]
+
+class AISummaryClient:
+    def __init__(self):
+        self.base_url = settings.LLM_API_BASE_URL.rstrip("/")
+        self.api_key = settings.LLM_API_KEY
+        self.model = settings.LLM_API_MODEL
+        self.timeout = settings.LLM_API_TIMEOUT_SEC
+
+    def summarize(self, *, reviews: list[str]) -> ReviewSummaryResult:
+        raise NotImplementedError
+```
+
+- 리뷰 `content` 텍스트 목록을 system/user 메시지로 구성해 `response_format: json_object`로 `{"score": int, "positive": [...], "negative": [...]}` 형태를 요청한다(`courses/ai_recommend.py`의 프롬프트 구성과 동일 패턴).
+- 리뷰가 많은 장소는 프롬프트가 비대해지므로 최신순 최대 50개까지만 잘라 보낸다.
+- HTTP 실패, JSON 파싱 실패, `score`가 0~100 범위 밖, `positive`/`negative`가 리스트가 아님 → 전부 `AISummaryError`로 변환한다(`courses/ai_recommend.py`의 `_parse_recommendation`과 동일하게 `_parse_summary`에서 일괄 검증).
+
+#### 7.21.3 캐시 모델 — `ReviewSummaryCache`
+
+```python
+class ReviewSummaryCache(models.Model):
+    place = models.OneToOneField(
+        "places.TouristSpot", on_delete=models.CASCADE,
+        related_name="review_summary_cache",
+    )
+    score = models.PositiveSmallIntegerField()
+    positive_keywords = models.JSONField(default=list)
+    negative_keywords = models.JSONField(default=list)
+    review_count_at_calc = models.PositiveIntegerField()
+    updated_at = models.DateTimeField(auto_now=True)
+```
+
+- `reviews` 앱에 신설한다 — `places.TouristSpot`에 필드를 추가하지 않는다. 이번 브랜치 범위를 reviews 쪽으로 한정한다(0절 원칙 1).
+- `place` 1:1 — 장소당 캐시 레코드 1개.
+- **재계산 조건**: 캐시가 없거나, 현재 리뷰 수가 `review_count_at_calc`보다 `RECOMPUTE_INTERVAL`(=5) 이상 늘었을 때만 LLM을 다시 호출한다. 그 외에는 캐시값을 그대로 응답한다.
+- **최소 데이터 조건**: 리뷰 수가 `MIN_REVIEWS_FOR_SUMMARY`(=5) 미만이면 캐시 존재 여부와 무관하게 항상 `INSUFFICIENT_DATA`(빈 `data`)를 응답한다 — 캐시가 이미 있어도 이후 리뷰가 신고 등으로 삭제되어 임계값 아래로 떨어지면 빈 응답으로 되돌아간다.
+- `MIN_REVIEWS_FOR_SUMMARY`·`RECOMPUTE_INTERVAL` 두 상수는 Notion 명세에 없는 이번 문서의 임의 결정이다 — 운영 데이터로 조정이 필요하다(7.21.6).
+
+#### 7.21.4 서비스 계층 (`reviews/services.py`, `get_review_summary`)
+
+```python
+MIN_REVIEWS_FOR_SUMMARY = 5
+RECOMPUTE_INTERVAL = 5
+
+def get_review_summary(*, target_id) -> dict:
+    reviews = list(Review.objects.filter(place_id=target_id).order_by("-id"))
+    count = len(reviews)
+    if count < MIN_REVIEWS_FOR_SUMMARY:
+        return {}
+
+    cache = ReviewSummaryCache.objects.filter(place_id=target_id).first()
+    if cache and count - cache.review_count_at_calc < RECOMPUTE_INTERVAL:
+        return _serialize(cache)
+
+    try:
+        result = AISummaryClient().summarize(reviews=[r.content for r in reviews[:50]])
+    except AISummaryError:
+        if cache:
+            return _serialize(cache)   # 실패 시 기존 캐시로 폴백
+        return {}                       # 캐시도 없으면 데이터 부족과 동일하게 처리
+
+    cache, _ = ReviewSummaryCache.objects.update_or_create(
+        place_id=target_id,
+        defaults={
+            "score": result.score,
+            "positive_keywords": result.positive,
+            "negative_keywords": result.negative,
+            "review_count_at_calc": count,
+        },
+    )
+    return _serialize(cache)
+```
+
+- **`targetId`가 존재하지 않는 `TouristSpot`을 가리켜도 `PLACE_NOT_FOUND`를 내지 않는다.** 같은 `authorization: none`·`targetId` 쿼리 구조의 형제 엔드포인트인 `GET /reviews`(7.15.5)도 `TouristSpot` 존재를 검증하지 않고 `Review.objects.filter(place_id=...)`만 수행하는 것과 동일하게 맞춘다. Notion 명세의 에러 코드 표에도 이 엔드포인트는 `INSUFFICIENT_DATA` 하나뿐이라 이 결정이 명세와 어긋나지 않는다.
+- LLM 실패를 `ApiError`(예: `EXTERNAL_API_ERROR`)로 올리지 않고 캐시 폴백 또는 빈 데이터로 흡수한다 — 관광지 혼잡도·교통(7.11.4)과 같은 "보조 데이터, 실패해도 200 유지" 패턴을 그대로 따른다.
+- `update_or_create` 단일 문으로 충분해 `transaction.atomic()`으로 감싸지 않는다(0절 원칙 3).
+
+#### 7.21.5 시리얼라이저 / 뷰 / URL
+
+- `reviews/serializers.py`: `ReviewSummaryQuerySerializer(targetId=IntegerField())`. 응답 `data`는 서비스가 만든 dict(`{}` 또는 `{"score", "keywords": {"positive", "negative"}}`)를 그대로 `ApiResponse(data=...)`에 넣는다 — 별도 응답 시리얼라이저 없이 서비스 계층에서 최종 shape을 만든다.
+- `reviews/views.py`: `ReviewSummaryView(APIView)`, `permission_classes = [AllowAny]`, `GET`만 구현. `@extend_schema(summary="AI 만족도·키워드 요약", operation_id="reviews_summary", tags=["Reviews"], auth=[], ...)`.
+- `reviews/urls.py`에 한 줄 추가:
+```python
+path("api/v1/reviews/summary", ReviewSummaryView.as_view(), name="summary"),
+```
+`api/v1/reviews`(컬렉션)·`api/v1/reviews/<int:reviewId>/...`와 URL 세그먼트가 겹치지 않아 등록 순서와 무관하게 충돌이 없다.
+
+#### 7.21.6 미해결 사항 갱신
+
+- 7.15.8 미해결 사항 3 **[해결]**: AI 연동은 LLM 재사용(7.21.1), 재계산 빈도는 `ReviewSummaryCache`(7.21.3)로 확정.
+- 7.15.8 미해결 사항 4(`places` 앱 `avgRating`/`aiSatisfaction`/통합검색 `rating` 고정값 교체)는 **이번 이슈에 포함하지 않는다.** `feature/reviews-ai-summary` 브랜치는 reviews 앱 범위로 한정하고(0절 원칙 1), `places/services.py`·`places/views.py` 변경은 별도 후속 이슈(가칭 "장소 상세/통합검색 리뷰 집계 반영")로 분리한다. 그 이슈에서 `avgRating`은 `Review.objects.filter(place=spot).aggregate(Avg("rating"))`, `aiSatisfaction`은 이번 절의 `get_review_summary` 결과를 재사용하는 방향으로 설계한다.
+- 새 미해결 사항: `MIN_REVIEWS_FOR_SUMMARY`/`RECOMPUTE_INTERVAL`(각 5)은 운영 데이터 없이 임의로 정한 값이다. 초기 리뷰가 거의 없는 서비스 특성상 값이 너무 낮으면 캐시 효과가 없고, 너무 높으면 요약이 오래 갱신되지 않는다 — 프론트/기획과 조정 필요.
+
+#### 7.21.7 테스트 관점 (`tests/test_reviews_summary.py`, 신규)
+
+`AISummaryClient.summarize`는 `unittest.mock.patch`로 모킹한다.
+
+- 리뷰 0~4개(임계값 미만): `summarize`가 호출되지 않고 `data: {}`.
+- 리뷰 5개 이상, 캐시 없음: `summarize` 호출, 응답에 `score`/`keywords.positive`/`keywords.negative`, `ReviewSummaryCache` 생성 확인.
+- 캐시 있음 + 이후 리뷰 증가량이 `RECOMPUTE_INTERVAL` 미만: `summarize`가 호출되지 않고 캐시값 그대로 응답.
+- 캐시 있음 + 증가량이 `RECOMPUTE_INTERVAL` 이상: `summarize` 재호출, 캐시 갱신.
+- `AISummaryError` 발생 + 캐시 없음: `data: {}`.
+- `AISummaryError` 발생 + 캐시 있음: 기존 캐시값으로 폴백 응답.
+- 존재하지 않는 `targetId`: `PLACE_NOT_FOUND`가 아니라 `data: {}`(200) — 7.21.4 결정 검증.
+- 인증 없이 호출해도 200(`AllowAny`) 확인.
+
 ## 8. 단계별 구현 계획
 
 - **Stage 0** — Django 프로젝트 뼈대: `config/` 생성, MySQL 연결, 빈 상태로 `manage.py migrate`/`runserver` 동작 확인. 도메인 앱 없음.
 - **Stage 1** — `accounts` 앱: 6절 모델/엔드포인트 구현. `common` 앱의 응답 포맷/에러 핸들러도 이 단계에서 함께 구현 (auth가 이를 바로 사용하므로).
 - **Stage 2** — `places` 앱: `TouristSpot`/`TouristSpotImage` 모델과 통합 검색(`/search`)/장소 상세/관광지 예상 방문 집중도/실시간 교통 혼잡 안내 4개 API. TourAPI는 조회 시 로컬 write-through 캐시, 집중률은 관광공사 예측 API, 교통은 카카오모빌리티 Directions API를 사용한다.
 - **Stage 3** — `courses` 앱: `Course`/`CoursePlace`/`CourseProgress` 모델 + 저장/시작/완주인증/공유 API(`feature/courses-base`, **완료** — 7.12절) → AI 맞춤 추천(`feature/courses-recommend`, **완료** — 7.13절) → 동선 최적화(`feature/courses-optimize`, 7.14절, **다음 착수 대상**), 3개 이슈로 순서대로 진행(`docs/roadmap.md` 4절).
-- **Stage 4** — `reviews`(7.15절) + `interactions`(7.16절) 앱: `Review`/`ReviewPhoto`/`ReviewReaction`/`ReviewReport`, `Bookmark`(장소 전용).
+- **Stage 4** — `reviews`(7.15절, **완료**) + `interactions`(7.16절, **완료**) 앱: `Review`/`ReviewPhoto`/`ReviewReaction`/`ReviewReport`, `Bookmark`(장소 전용) → AI 만족도·키워드 요약(`feature/reviews-ai-summary`, 7.21절, **다음 착수 대상**).
 - **Stage 5** — `gamification` 앱(7.17절): `Stamp`/`HiddenCourse`/`UserHiddenCourseUnlock`/`CompletionCard`(`RegionStamp` 마스터 테이블 없음, 완주카드는 course 단위).
 - **Stage 6** — `mypage`(7.18절, `accounts.User`에 `profile_img` 필드·`nickname` unique 마이그레이션 추가 포함) + `home`(7.19절, 조회 전용, `courses`·`gamification` 완료 후 전체 구현 가능) + `common.UserSettings`(7.20절, 중첩 응답 구조).
 - **Stage 7** — 배포 준비: settings dev/prod 분리, Dockerfile, Nginx, CI(`.github/workflows/ci.yml`) 갱신.

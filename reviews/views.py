@@ -6,9 +6,15 @@ from rest_framework.views import APIView
 from common.response import ApiResponse
 from reviews.serializers import (
     ReviewCreateSerializer, ReviewListItemSerializer, ReviewListQuerySerializer,
-    ReviewReportSerializer, ReviewsErrorResponseSerializer,
+    ReviewReportSerializer, ReviewSummaryQuerySerializer, ReviewsErrorResponseSerializer,
 )
-from reviews.services import create_report, create_review, list_reviews, toggle_review_helpful
+from reviews.services import (
+    create_report,
+    create_review,
+    get_review_summary,
+    list_reviews,
+    toggle_review_helpful,
+)
 
 
 CreateResponse = inline_serializer("ReviewCreateSuccess", fields={
@@ -29,6 +35,17 @@ HelpfulResponse = inline_serializer("ReviewHelpfulSuccess", fields={
 ReportResponse = inline_serializer("ReviewReportSuccess", fields={
     "success": serializers.BooleanField(),
     "data": inline_serializer("ReviewReportData", fields={"reported": serializers.BooleanField()}),
+    "error": serializers.JSONField(allow_null=True),
+})
+SummaryResponse = inline_serializer("ReviewSummarySuccess", fields={
+    "success": serializers.BooleanField(),
+    "data": inline_serializer("ReviewSummaryData", fields={
+        "score": serializers.IntegerField(),
+        "keywords": inline_serializer("ReviewSummaryKeywords", fields={
+            "positive": serializers.ListField(child=serializers.CharField()),
+            "negative": serializers.ListField(child=serializers.CharField()),
+        }),
+    }),
     "error": serializers.JSONField(allow_null=True),
 })
 
@@ -63,6 +80,20 @@ class ReviewCollectionView(APIView):
         values = serializer.validated_data
         reviews = list_reviews(target_id=values["targetId"], sort=values["sort"])
         return ApiResponse(data={"reviews": ReviewListItemSerializer(reviews, many=True).data})
+
+
+class ReviewSummaryView(APIView):
+    permission_classes = [AllowAny]
+
+    @extend_schema(
+        summary="AI 만족도·키워드 요약", operation_id="reviews_summary", tags=["Reviews"],
+        auth=[], parameters=[ReviewSummaryQuerySerializer], responses={200: SummaryResponse},
+    )
+    def get(self, request):
+        serializer = ReviewSummaryQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        data = get_review_summary(target_id=serializer.validated_data["targetId"])
+        return ApiResponse(data=data)
 
 
 class ReviewHelpfulView(APIView):

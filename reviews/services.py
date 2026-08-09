@@ -3,7 +3,18 @@ from django.db.models import Prefetch
 
 from common.exceptions import ApiError, ErrorCode
 from places.models import TouristSpot
-from reviews.models import Review, ReviewPhoto, ReviewReaction, ReviewReport
+from reviews.ai_summary import AISummaryClient, AISummaryError
+from reviews.models import (
+    Review,
+    ReviewPhoto,
+    ReviewReaction,
+    ReviewReport,
+    ReviewSummaryCache,
+)
+
+
+MIN_REVIEWS_FOR_SUMMARY = 5
+RECOMPUTE_INTERVAL = 5
 
 
 def create_review(*, user, target_id, rating, text, photos, visit_date, visit_weather) -> Review:
@@ -72,3 +83,46 @@ def create_report(*, review_id, user, reason) -> ReviewReport:
         review=review, user=user, defaults={"reason": reason}
     )
     return report
+
+
+def _serialize_summary(cache: ReviewSummaryCache) -> dict:
+    return {
+        "score": cache.score,
+        "keywords": {
+            "positive": cache.positive_keywords,
+            "negative": cache.negative_keywords,
+        },
+    }
+
+
+def get_review_summary(*, target_id) -> dict:
+    reviews = Review.objects.filter(place_id=target_id)
+    count = reviews.count()
+    if count < MIN_REVIEWS_FOR_SUMMARY:
+        return {}
+
+    cache = ReviewSummaryCache.objects.filter(place_id=target_id).first()
+    if cache and count - cache.review_count_at_calc < RECOMPUTE_INTERVAL:
+        return _serialize_summary(cache)
+
+    try:
+        result = AISummaryClient().summarize(
+            reviews=list(
+                reviews.order_by("-id").values_list("content", flat=True)[:50]
+            )
+        )
+    except AISummaryError:
+        if cache:
+            return _serialize_summary(cache)
+        return {}
+
+    cache, _ = ReviewSummaryCache.objects.update_or_create(
+        place_id=target_id,
+        defaults={
+            "score": result.score,
+            "positive_keywords": result.positive,
+            "negative_keywords": result.negative,
+            "review_count_at_calc": count,
+        },
+    )
+    return _serialize_summary(cache)

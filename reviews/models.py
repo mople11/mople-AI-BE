@@ -64,3 +64,16 @@ class ReviewReport(models.Model):
                 name="reviews_report_review_user_unique",
             )
         ]
+
+
+class ReviewSummaryCache(models.Model):
+    place = models.OneToOneField(
+        "places.TouristSpot",
+        related_name="review_summary_cache",
+        on_delete=models.CASCADE,
+    )
+    score = models.PositiveSmallIntegerField()
+    positive_keywords = models.JSONField(default=list)
+    negative_keywords = models.JSONField(default=list)
+    review_count_at_calc = models.PositiveIntegerField()
+    updated_at = models.DateTimeField(auto_now=True)

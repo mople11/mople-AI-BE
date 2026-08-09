@@ -19,6 +19,10 @@ class ReviewListQuerySerializer(serializers.Serializer):
     sort = serializers.ChoiceField(choices=["latest", "rating"], required=False, default="latest")
 
 
+class ReviewSummaryQuerySerializer(serializers.Serializer):
+    targetId = serializers.IntegerField()
+
+
 class ReviewListItemSerializer(serializers.ModelSerializer):
     reviewId = serializers.CharField(source="id")
     author = serializers.CharField(source="user.nickname")

@@ -19,4 +19,5 @@ urlpatterns = [
     path("", include("places.urls")),
     path("", include("reviews.urls")),
     path("", include("interactions.urls")),
+    path("", include("gamification.urls")),
 ]

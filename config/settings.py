@@ -41,6 +41,7 @@ INSTALLED_APPS = [
     "courses",
     "reviews",
     "interactions",
+    "gamification",
 ]
 
 MIDDLEWARE = [

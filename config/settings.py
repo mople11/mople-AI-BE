@@ -188,3 +188,7 @@ COURSE_SHARE_BASE_URL = env(
     "COURSE_SHARE_BASE_URL",
     default="https://eodiganam.app/courses",
 )
+CARD_SHARE_BASE_URL = env(
+    "CARD_SHARE_BASE_URL",
+    default="https://eodiganam.app/cards",
+)

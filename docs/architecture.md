@@ -1925,25 +1925,222 @@ unlockBanner), `recommendedCourses` 최신 저장순 확인, `unlockBanner.avail
 분기 확인. 뷰 테스트의 기상청 API 호출은 `KmaClient.get_current_weather` mock 처리하고,
 `KmaClient` 단위 테스트에서 요청 파라미터·정상 응답 파싱·API 오류·필드 누락·타임아웃을 검증한다.
 
-### 7.20 `common` 앱 상세 설계 (Stage 6 실행용, `feature/common-settings`)
+### 7.20 `common` 앱 상세 설계 (Stage 6 실행용, `feature/common-settings`, GitHub 이슈 #36 기준)
 
-> Notion "공통" 그룹 API spec 2개 확정 경로 근거.
+> Notion "공통" 그룹 기능명세서(`설정` 페이지 `d8304d37-4d27-82b0-b9ef-811a6c7695c9`, `온보딩` 페이지 `f0304d37-4d27-8297-8418-81829d7149b8`) 근거. 온보딩은 서버 상태가 없는 클라이언트 전용 화면이므로 백엔드 작업은 `GET /api/v1/settings`, `PATCH /api/v1/settings` 2개 엔드포인트로 한정한다.
 
-#### 7.20.1 모델
+#### 7.20.1 모델 (`common/models.py`)
 
-**`UserSettings`**: `user`(`OneToOneField`), `push_notification_enabled`(응답 `notifications.push`), `golden_hour_notification_enabled`(응답 `notifications.goldenHour`, 정확한 정의 미해결 사항 1), `language`(choices `ko`/`en`/`ja`/`zh`), `location_permission_granted`(응답 `permissions.location` — OS 권한이 아니라 사용자 동의 값으로 해석, 미해결 사항 2).
+```python
+from django.conf import settings as django_settings
+from django.db import models
 
-#### 7.20.2 엔드포인트
 
-**`GET /settings`**: `{notifications:{push,goldenHour}, language, permissions:{location}}`.
+class UserSettings(models.Model):
+    class Language(models.TextChoices):
+        KOREAN = "ko", "한국어"
+        ENGLISH = "en", "English"
+        JAPANESE = "ja", "日本語"
+        CHINESE = "zh", "中文"
 
-**`PATCH /settings`**: 동일 구조 요청 → `{updated:true}`. `UserSettings.objects.get_or_create(user=request.user)`로 최초 접근 시 기본값 생성.
+    user = models.OneToOneField(
+        django_settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="settings",
+    )
+    push_notification_enabled = models.BooleanField(default=True)
+    golden_hour_notification_enabled = models.BooleanField(default=True)
+    language = models.CharField(
+        max_length=2, choices=Language.choices, default=Language.KOREAN
+    )
+    location_permission_granted = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+```
 
-**미해결 사항**
-1. `goldenHour` 알림 정확한 정의는 기능명세서 재확인 필요.
-2. `permissions.location`의 정확한 의미 재확인 필요.
+**기본값 결정 근거**: Notion 명세에는 각 토글의 기본값이 명시되어 있지 않다. `push_notification_enabled`/`golden_hour_notification_enabled`는 다른 국내 서비스의 일반적 관행(옵트아웃)에 따라 `True`로, `location_permission_granted`는 온보딩에서 OS 권한을 명시적으로 허용해야만 켜지는 값이므로 보수적으로 `False`를 기본값으로 둔다.
 
-**테스트 관점**: 최초 접근 시 기본값 자동 생성, 설정 변경 각 필드 갱신 확인.
+#### 7.20.2 시리얼라이저 (`common/serializers.py`)
+
+응답은 평평한 모델 필드를 `notifications`/`permissions` 중첩 구조로 변환해야 한다. DRF 중첩 시리얼라이저 필드에 `source="*"`를 주면 부모 인스턴스 전체를 그대로 넘겨줄 수 있으므로, `UserSettings` 모델 인스턴스 하나로 중첩 필드를 채울 수 있다.
+
+```python
+from rest_framework import serializers
+
+from common.models import UserSettings
+
+
+class NotificationsSerializer(serializers.Serializer):
+    push = serializers.BooleanField(source="push_notification_enabled")
+    goldenHour = serializers.BooleanField(source="golden_hour_notification_enabled")
+
+
+class PermissionsSerializer(serializers.Serializer):
+    location = serializers.BooleanField(source="location_permission_granted")
+
+
+class UserSettingsSerializer(serializers.Serializer):
+    notifications = NotificationsSerializer(source="*")
+    language = serializers.CharField()
+    permissions = PermissionsSerializer(source="*")
+```
+
+`PATCH` 요청 바디도 동일하게 중첩 구조이지만 전 필드가 부분 갱신 대상이므로 전부 `required=False`로 두고, 최소 1개 필드는 있어야 함을 `validate()`에서 강제한다(`mypage.ProfileUpdateSerializer`와 동일 패턴).
+
+```python
+class NotificationsUpdateSerializer(serializers.Serializer):
+    push = serializers.BooleanField(
+        source="push_notification_enabled", required=False
+    )
+    goldenHour = serializers.BooleanField(
+        source="golden_hour_notification_enabled", required=False
+    )
+
+
+class PermissionsUpdateSerializer(serializers.Serializer):
+    location = serializers.BooleanField(
+        source="location_permission_granted", required=False
+    )
+
+
+class UserSettingsUpdateSerializer(serializers.Serializer):
+    notifications = NotificationsUpdateSerializer(required=False)
+    language = serializers.ChoiceField(
+        choices=UserSettings.Language.choices, required=False
+    )
+    permissions = PermissionsUpdateSerializer(required=False)
+
+    def validate(self, attrs):
+        if not attrs:
+            raise serializers.ValidationError(
+                "변경할 항목을 하나 이상 입력해야 합니다."
+            )
+        return attrs
+```
+
+`validated_data["notifications"]`/`["permissions"]`는 중첩 딕셔너리(`{"push_notification_enabled": True}` 등)로 나오므로, 뷰에서 모델 필드명 기준으로 한 단계 평탄화해 서비스 계층에 넘긴다.
+
+#### 7.20.3 서비스 계층 (`common/services.py`)
+
+```python
+from common.models import UserSettings
+
+
+def get_or_create_settings(*, user) -> UserSettings:
+    settings_obj, _ = UserSettings.objects.get_or_create(user=user)
+    return settings_obj
+
+
+def update_settings(*, user, **fields) -> UserSettings:
+    settings_obj, _ = UserSettings.objects.get_or_create(user=user)
+    if fields:
+        for field, value in fields.items():
+            setattr(settings_obj, field, value)
+        settings_obj.save(update_fields=list(fields.keys()))
+    return settings_obj
+```
+
+`get_or_create`를 뷰가 아니라 서비스 계층에 두는 이유는 다른 앱(`accounts.services`, `mypage.services`)과 동일한 계층 분리를 유지하기 위함이다.
+
+#### 7.20.4 뷰 / URL 등록 (`common/views.py`, `common/urls.py`)
+
+```python
+# common/views.py
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import serializers
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
+
+from common.response import ApiResponse
+from common.serializers import UserSettingsSerializer, UserSettingsUpdateSerializer
+from common.services import get_or_create_settings, update_settings
+
+
+def _flatten(validated_data: dict) -> dict:
+    fields = {}
+    fields.update(validated_data.get("notifications", {}))
+    fields.update(validated_data.get("permissions", {}))
+    if "language" in validated_data:
+        fields["language"] = validated_data["language"]
+    return fields
+
+
+SettingsResponse = inline_serializer(
+    "UserSettingsSuccess",
+    fields={
+        "success": serializers.BooleanField(),
+        "data": UserSettingsSerializer(),
+        "error": serializers.JSONField(allow_null=True),
+    },
+)
+
+
+class UserSettingsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="설정 조회",
+        operation_id="settings_retrieve",
+        tags=["Common"],
+        responses={200: SettingsResponse},
+    )
+    def get(self, request):
+        settings_obj = get_or_create_settings(user=request.user)
+        return ApiResponse(data=UserSettingsSerializer(settings_obj).data)
+
+    @extend_schema(
+        summary="설정 변경",
+        operation_id="settings_update",
+        tags=["Common"],
+        request=UserSettingsUpdateSerializer,
+        responses={200: SettingsResponse},
+    )
+    def patch(self, request):
+        serializer = UserSettingsUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        update_settings(user=request.user, **_flatten(serializer.validated_data))
+        return ApiResponse(data={"updated": True})
+```
+
+```python
+# common/urls.py
+from django.urls import path
+
+from common.views import UserSettingsView
+
+app_name = "common"
+
+urlpatterns = [
+    path("api/v1/settings", UserSettingsView.as_view(), name="settings"),
+]
+```
+
+`config/urls.py`에 다른 앱들과 동일한 방식으로 등록한다: `path("", include("common.urls"))`.
+
+#### 7.20.5 미해결 사항 해결
+
+1. **`goldenHour` 알림 정의 [해결]**: Notion "설정" 페이지 명세에는 "골든아워 알림 on/off" 토글과 안내 메시지("골든아워 알림을 켜솠어요.")만 있을 뿐, 무엇이 golden hour를 트리거하는지(일몰 시간대·특정 날씨 조건 등)와 실제 발송 인프라(스케줄러/푸시 서버 연동)는 Notion 어디에도 정의되어 있지 않다. 0절 원칙 2("없는 스펙을 임의로 만들지 않는다")에 따라 이번 이슈 범위는 이 토글값을 저장·조회·변경하는 것으로 한정하고, 실제 golden hour 알림을 언제·어떤 조건으로 발송할지는 Notion 명세가 확정된 뒤 별도 이슈에서 다룬다.
+2. **`permissions.location` 의미 [해결]**: Notion "온보딩" 페이지 명세를 보면 위치 권한은 앱 최초 실행 시 OS 레벨 권한 다이얼로그로 요청되고("위치 권한 허용" 버튼, 거부 시 "위치 없이도 지역을 직접 선택해 이용할 수 있어요." 안내), "설정" 페이지에는 별도로 "위치 권한 관리" 버튼이 있다. Django 서버는 클라이언트 OS의 실제 권한 상태를 직접 조회할 수 없으므로, `location_permission_granted`는 OS 권한값 자체가 아니라 **클라이언트가 마지막으로 보고한 위치 권한 동의 상태를 서버에 캐싱한 값**으로 해석한다. 클라이언트는 온보딩 완료 시점과 설정 화면에서 권한이 바뀔 때마다 `PATCH /api/v1/settings`로 이 값을 갱신할 책임이 있다 — 클라이언트가 갱신을 누락하면 서버 값이 실제 OS 권한과 어긋날 수 있다는 한계는 있으나, 서버 쪽에서 강제로 동기화할 방법이 없으므로 이번 범위에서는 감수한다.
+
+#### 7.20.6 테스트 관점 (`tests/test_common_settings.py`, 신규)
+
+- `GET /api/v1/settings` 최초 접근 시 `UserSettings` 레코드가 없다가 자동 생성되고, 7.20.1의 기본값(`push=True`, `goldenHour=True`, `language="ko"`, `location=False`)으로 응답하는지 확인.
+- `GET /api/v1/settings` 인증 없이 요청 시 `AUTH_401`.
+- `PATCH /api/v1/settings`로 `notifications.push`만 변경 → 응답 `{"updated": true}`이고, 이어지는 `GET`에서 해당 필드만 바뀌고 나머지는 유지되는지 확인.
+- `PATCH /api/v1/settings`로 `language`, `permissions.location`도 각각 단독 변경 확인.
+- `PATCH /api/v1/settings`로 여러 필드 동시 변경 확인.
+- `PATCH /api/v1/settings` 빈 바디(`{}`) → `COMMON_422`(`validate()`의 최소 1개 필드 요구).
+- `PATCH /api/v1/settings`에 잘못된 `language` 값(예: `"fr"`) → `COMMON_422` + `error.details.notifications` 형태가 아니라 `error.details.language`인지 확인.
+- `PATCH /api/v1/settings` 인증 없이 요청 시 `AUTH_401`.
+
+#### 7.20.7 완료 조건 매핑 (이슈 #36)
+
+| 이슈 완료 조건 | 대응 절 |
+|---|---|
+| `UserSettings` 모델·마이그레이션 존재 | 7.20.1 |
+| `GET /api/v1/settings`가 명세대로 응답, 최초 접근 시 기본값 자동 생성 | 7.20.2, 7.20.3, 7.20.4 |
+| `PATCH /api/v1/settings`로 각 그룹 필드 갱신 가능 | 7.20.2, 7.20.3, 7.20.4 |
+| pytest 전체 통과 | 7.20.6 |
 
 ### 7.21 `reviews` 앱 AI 만족도·키워드 요약 상세 설계 (`feature/reviews-ai-summary`)
 

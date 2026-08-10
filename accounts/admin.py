@@ -9,7 +9,15 @@ class CustomUserAdmin(UserAdmin):
     fieldsets = UserAdmin.fieldsets + (
         (
             "추가 정보",
-            {"fields": ("nickname", "agreed_terms_at", "provider", "provider_id")},
+            {
+                "fields": (
+                    "nickname",
+                    "profile_img",
+                    "agreed_terms_at",
+                    "provider",
+                    "provider_id",
+                )
+            },
         ),
     )
     add_fieldsets = UserAdmin.add_fieldsets + (

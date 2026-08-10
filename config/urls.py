@@ -20,4 +20,5 @@ urlpatterns = [
     path("", include("reviews.urls")),
     path("", include("interactions.urls")),
     path("", include("gamification.urls")),
+    path("", include("mypage.urls")),
 ]

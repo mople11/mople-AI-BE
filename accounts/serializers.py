@@ -144,6 +144,11 @@ class SignupSerializer(serializers.Serializer):
             raise ApiError(ErrorCode.DUPLICATE_EMAIL)
         return value
 
+    def validate_nickname(self, value: str) -> str:
+        if User.objects.filter(nickname=value).exists():
+            raise ApiError(ErrorCode.NICKNAME_DUPLICATE)
+        return value
+
     def validate_agreeTerms(self, value: bool) -> bool:
         if not value:
             raise ApiError(ErrorCode.TERMS_NOT_AGREED)
@@ -200,6 +205,8 @@ class SignupSerializer(serializers.Serializer):
                 raise ApiError(ErrorCode.DUPLICATE_ID)
             if User.objects.filter(email=user.email).exists():
                 raise ApiError(ErrorCode.DUPLICATE_EMAIL)
+            if User.objects.filter(nickname=user.nickname).exists():
+                raise ApiError(ErrorCode.NICKNAME_DUPLICATE)
             raise
         return user
 

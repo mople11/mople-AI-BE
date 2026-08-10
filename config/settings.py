@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     "reviews",
     "interactions",
     "gamification",
+    "mypage",
 ]
 
 MIDDLEWARE = [

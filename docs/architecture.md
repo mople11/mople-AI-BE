@@ -1864,10 +1864,12 @@ urlpatterns = [
 - **`GET /users/me/courses`**: `CourseProgress.objects.filter(user=request.user, status__in=["SAVED","IN_PROGRESS","COMPLETED"])` → `course.name`.
 - **`GET /users/me/reviews`**: `Review.objects.filter(user=request.user)` → `targetName`은 `review.place.name`.
 - **`GET /users/me/likes`**: `Bookmark.objects.filter(user=request.user)` → `place.id`/`place.name`.
+- **목록 정렬 기준**: 저장 코스는 `CourseProgress.updated_at` 내림차순(최근 활동 순), 후기는 `Review.id` 내림차순(기존 후기 목록 기본 정렬과 동일), 찜은 `Bookmark.created_at` 내림차순(최근 찜한 순).
 
-**미해결 사항**
-1. `nickname` unique 마이그레이션 전 기존 DB 중복 확인 필요.
-2. `profileImg` 업로드 방식(URL vs 파일 업로드) 확인 필요.
+**미해결 사항 갱신**
+1. **[해결]** `nickname` unique 마이그레이션 전 현재 Docker MySQL에서 중복을 확인했고 결과는 `[]`였다. 데이터 수정 없이 `profile_img` 추가(`accounts.0004`)와 `nickname unique` 적용(`accounts.0005`)을 별도 마이그레이션으로 분리했다.
+2. **[해결]** `profileImg`는 URL 문자열로 확정한다. 파일 업로드 엔드포인트는 두지 않으며 `ReviewPhoto.image_url`/`CompletionCard.card_image_url`과 같은 외부 업로드·백엔드 URL 저장 패턴을 따른다.
+3. **[후속]** 목록 3종의 페이지네이션·응답 상한은 Notion 요청/응답 계약에 파라미터가 없어 이번 이슈에서 임의로 추가하지 않는다. 운영 데이터 증가 전에 공통 페이지네이션 계약을 정하고 별도 이슈로 적용한다.
 
 **테스트 관점** (`tests/test_mypage_*.py`, 신규)
 - 프로필·활동요약 조회, 프로필 수정 성공/`NICKNAME_DUPLICATE`.

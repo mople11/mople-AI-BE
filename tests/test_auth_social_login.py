@@ -135,6 +135,33 @@ def test_google_login_creates_new_user(mock_verify, api_client, db, google_profi
 
 
 @patch("accounts.views.verify_google_id_token")
+def test_social_login_makes_duplicate_profile_nicknames_unique(
+    mock_verify, api_client, db
+):
+    mock_verify.side_effect = [
+        {
+            "provider_id": "google-user-1",
+            "email": "google-user-1@example.com",
+            "nickname": "여행자",
+        },
+        {
+            "provider_id": "google-user-2",
+            "email": "google-user-2@example.com",
+            "nickname": "여행자",
+        },
+    ]
+
+    first = social_login(api_client, provider="google", oauthToken="first-token")
+    second = social_login(api_client, provider="google", oauthToken="second-token")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.data["data"]["user"]["nickname"] == "여행자"
+    assert second.data["data"]["user"]["nickname"] == "여행자_1"
+    assert User.objects.filter(nickname__in=["여행자", "여행자_1"]).count() == 2
+
+
+@patch("accounts.views.verify_google_id_token")
 def test_google_login_returns_existing_social_user(
     mock_verify, api_client, db, google_profile
 ):

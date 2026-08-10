@@ -128,26 +128,39 @@ def find_or_create_social_user(
         username = f"{provider}_{sha256(provider_id.encode()).hexdigest()}"
 
     nickname_max_length = User._meta.get_field("nickname").max_length
-    user = User(
-        username=username,
-        email=email,
-        nickname=nickname[:nickname_max_length],
-        provider=provider,
-        provider_id=provider_id,
-    )
-    user.set_unusable_password()
-    try:
-        user.save()
-    except IntegrityError:
-        existing = User.objects.filter(
-            provider=provider, provider_id=provider_id
-        ).first()
-        if existing is not None:
-            return existing
-        if User.objects.filter(username=user.username).exists():
-            raise ApiError(ErrorCode.DUPLICATE_ID)
-        if User.objects.filter(email=user.email).exists():
-            raise ApiError(ErrorCode.SOCIAL_EMAIL_CONFLICT)
-        raise
+    base_nickname = nickname[:nickname_max_length]
+    suffix = 0
 
-    return user
+    while True:
+        tag = "" if suffix == 0 else f"_{suffix}"
+        unique_nickname = f"{base_nickname[: nickname_max_length - len(tag)]}{tag}"
+        if User.objects.filter(nickname=unique_nickname).exists():
+            suffix += 1
+            continue
+
+        user = User(
+            username=username,
+            email=email,
+            nickname=unique_nickname,
+            provider=provider,
+            provider_id=provider_id,
+        )
+        user.set_unusable_password()
+        try:
+            user.save()
+        except IntegrityError:
+            existing = User.objects.filter(
+                provider=provider, provider_id=provider_id
+            ).first()
+            if existing is not None:
+                return existing
+            if User.objects.filter(email=user.email).exists():
+                raise ApiError(ErrorCode.SOCIAL_EMAIL_CONFLICT)
+            if User.objects.filter(nickname=user.nickname).exists():
+                suffix += 1
+                continue
+            if User.objects.filter(username=user.username).exists():
+                raise ApiError(ErrorCode.DUPLICATE_ID)
+            raise
+
+        return user

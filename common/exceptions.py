@@ -21,6 +21,11 @@ class ErrorCode(Enum):
         409,
         "이미 사용 중인 이메일입니다.",
     )
+    NICKNAME_DUPLICATE = (
+        "NICKNAME_DUPLICATE",
+        409,
+        "이미 사용 중인 닉네임입니다.",
+    )
     CODE_MISMATCH = ("CODE_MISMATCH", 400, "인증번호가 일치하지 않습니다.")
     CODE_EXPIRED = ("CODE_EXPIRED", 400, "인증번호가 만료되었습니다.")
     CODE_ALREADY_USED = (

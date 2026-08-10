@@ -96,6 +96,28 @@ def test_signup_duplicate_email(api_client):
 
 
 @pytest.mark.django_db
+def test_signup_duplicate_nickname(api_client):
+    User.objects.create_user(
+        username="existing-nickname-user",
+        email="existing-nickname@example.com",
+        nickname="여행자",
+        password="safe-password-123",
+    )
+
+    response = api_client.post(SIGNUP_URL, signup_payload(), format="json")
+
+    assert response.status_code == 409
+    assert response.data == {
+        "success": False,
+        "data": None,
+        "error": {
+            "code": "NICKNAME_DUPLICATE",
+            "message": "이미 사용 중인 닉네임입니다.",
+        },
+    }
+
+
+@pytest.mark.django_db
 def test_check_id_duplicate(api_client):
     User.objects.create_user(
         username="traveler",

@@ -13,6 +13,7 @@ env = environ.Env(
     JWT_REFRESH_TOKEN_LIFETIME_DAYS=(int, 14),
     EMAIL_VERIFICATION_CODE_LIFETIME_MIN=(int, 5),
     TOUR_API_TIMEOUT_SEC=(int, 5),
+    KMA_API_TIMEOUT_SEC=(int, 5),
     TOUR_CONGESTION_API_TIMEOUT_SEC=(int, 5),
     KAKAO_MOBILITY_TIMEOUT_SEC=(int, 5),
     COURSE_CHECKIN_RADIUS_M=(int, 200),
@@ -43,6 +44,7 @@ INSTALLED_APPS = [
     "interactions",
     "gamification",
     "mypage",
+    "home",
 ]
 
 MIDDLEWARE = [
@@ -157,6 +159,13 @@ TOUR_API_BASE_URL = env(
 )
 TOUR_API_SERVICE_KEY = env("TOUR_API_SERVICE_KEY", default="")
 TOUR_API_TIMEOUT_SEC = env("TOUR_API_TIMEOUT_SEC")
+
+KMA_API_BASE_URL = env(
+    "KMA_API_BASE_URL",
+    default="https://apis.data.go.kr/1360000/VilageFcstInfoService2.0",
+)
+KMA_API_SERVICE_KEY = env("KMA_API_SERVICE_KEY", default="")
+KMA_API_TIMEOUT_SEC = env("KMA_API_TIMEOUT_SEC")
 
 TOUR_CONGESTION_API_BASE_URL = env(
     "TOUR_CONGESTION_API_BASE_URL",

@@ -1892,11 +1892,38 @@ urlpatterns = [
 - **`unlockBanner.available`**: 요청 좌표 기준 아직 잠금 해제 안 된 `gamification.HiddenCourse` 존재 여부(`GET /courses/unlocked`의 `lockedCourses`와 같은 조회, 7.17.5) — `gamification`(Stage 5) 완료 선행 필요.
 
 **미해결 사항**
-1. 기상청 API 연동 방식 미확정.
-2. `recommendedCourses` 선정 기준 미확정.
-3. `courses`(Stage 3)·`gamification`(Stage 5) 의존 — `/weather/current`만 먼저 만들고 `/home`은 미루는 분할도 고려.
+1. **[해결]** 기상청 API 연동 방식은 아래 7.19.3과 같이 확정했다.
+2. **[해결]** `recommendedCourses` 선정 기준은 아래 7.19.3과 같이 확정했다.
+3. **[해결]** `courses`(Stage 3)·`gamification`(Stage 5)이 구현되어 `/weather/current`와 `/home`을 함께 구현했다.
 
 **테스트 관점**: 현재 날씨 성공/실패(`WEATHER_FETCH_FAILED`), 메인 홈 데이터 필드 확인.
+
+#### 7.19.3 실행 결과 (`feature/home`)
+
+- **미해결 사항 1 [해결] — 기상청 API 연동 방식.** 초단기실황조회(UltraSrtNcst)를 사용한다.
+  좌표→격자 변환은 기상청 공개 Lambert Conformal Conic 알고리즘을 `home/kma.py`에 직접
+  구현했다(외부 라이브러리 없이 — `calculate_distance_km`을 haversine으로 직접 구현해온
+  기존 패턴과 동일). UltraSrtNcst는 하늘상태(SKY)를 제공하지 않고 강수형태(PTY)만 제공하므로,
+  `weatherType`/`icon`은 PTY 코드 기반으로 새로 매핑했다(맑음/비/비눈/눈/소나기).
+  base_time은 "매시 40분 이후 최신 관측 안정적으로 제공"을 가정해 분<40이면 이전 시각을
+  사용하는 규칙을 채택했다(설계 결정, 공식 문서 근거 아님).
+- **미해결 사항 2 [해결] — `recommendedCourses` 선정 기준.** `Course`에 타임스탬프 필드가
+  없어 `gamification.CompletionCard`/`mypage.get_my_reviews`의 기존 관례(타임스탬프 없을 때
+  `-id`를 최신순 근사로 사용)를 그대로 따른다: `Course.objects.filter(status=SAVED)
+  .order_by("-id")[:5]`. 거리/날씨 매칭 로직은 운영 데이터가 쌓인 뒤 별도 이슈로 고도화한다.
+- **미해결 사항 3 [해결] — `courses`/`gamification` 의존.** 두 앱 모두 이미 구현 완료 상태라
+  분할 없이 `/weather/current`·`/home`을 한 브랜치에서 함께 구현했다.
+  `unlockBanner.available`은 `GET /courses/unlocked`(7.17.8)의 확정 로직 —
+  `HiddenCourse` 전체 vs `UserHiddenCourseUnlock` 존재 여부(반경 필터링 없음) — 을 그대로
+  재사용한다. 다만 `GET /home`은 `AllowAny`라 비로그인 접근이 가능해, `user.is_authenticated`로
+  분기했다: 비로그인이면 해금 이력이 있을 수 없으므로 `HiddenCourse.objects.exists()`와
+  동일한 결과가 되도록 처리한다.
+
+**테스트 결과**: `tests/test_home.py` — 좌표→격자 변환 유닛 테스트(서울시청 검증값 포함),
+현재 날씨 성공/`WEATHER_FETCH_FAILED`, 메인 홈 데이터 필드 확인(weather/recommendedCourses/
+unlockBanner), `recommendedCourses` 최신 저장순 확인, `unlockBanner.available` 로그인/비로그인
+분기 확인. 뷰 테스트의 기상청 API 호출은 `KmaClient.get_current_weather` mock 처리하고,
+`KmaClient` 단위 테스트에서 요청 파라미터·정상 응답 파싱·API 오류·필드 누락·타임아웃을 검증한다.
 
 ### 7.20 `common` 앱 상세 설계 (Stage 6 실행용, `feature/common-settings`)
 

@@ -50,6 +50,11 @@ class ErrorCode(Enum):
         502,
         "외부 정보를 불러오지 못했습니다.",
     )
+    WEATHER_FETCH_FAILED = (
+        "WEATHER_FETCH_FAILED",
+        502,
+        "날씨 정보를 불러오지 못했습니다.",
+    )
     PLACE_NOT_FOUND = (
         "PLACE_NOT_FOUND",
         404,

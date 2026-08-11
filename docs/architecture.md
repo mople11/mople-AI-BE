@@ -2654,6 +2654,140 @@ SearchResponse = inline_serializer("SpotSearchSuccess", fields={
 - 통합검색의 건별 평균 집계 쿼리는 현재 규모에서 허용한다. 실제 검색 결과 수와
   쿼리 비용이 문제가 되면 `place_id__in` 배치 집계나 ORM annotation을 후속으로 검토한다.
 
+### 7.25 AWS 배포 (Stage 7-③, `chore/aws-deploy`)
+
+#### 7.25.1 범위와 배경
+
+`chore/deploy-config`(#38, PR #40, 7.22절)가 settings dev/prod 분리·Dockerfile·
+`docker-compose.yml`(MySQL+app+Nginx)까지 만들었지만, 7.22.5 미해결 사항으로 "TLS
+종료, 실제 도메인, 배포 플랫폼의 secret 주입 방식은 인프라가 확정되지 않아 정하지
+않는다"를 남겨뒀다. 이 이슈에서 실제 AWS 인프라를 정하고 그 위에 기존
+`docker-compose.yml`을 그대로 올린다. 도메인 인프라·모델·API 계약은 바꾸지 않는다.
+사람이 직접 실행할 단계별 명령은 `docs/deploy-runbook.md`에 정리되어 있다.
+
+#### 7.25.2 결정 사항 (사용자 승인, AskUserQuestion)
+
+- **컴퓨트**: EC2 단일 인스턴스. ECS Fargate 등 관리형 컨테이너 서비스는 채택하지
+  않는다 — 이미 `docker-compose.yml` 하나로 MySQL+app+Nginx가 완결돼 있고, 포트폴리오
+  프로젝트 규모에서 ECS로 다시 정의하는 비용/복잡도가 이득보다 크다(0절 원칙 3).
+- **DB**: RDS를 새로 두지 않고 기존 `docker-compose.yml`의 `mysql` 서비스를 EC2
+  안에서 그대로 실행한다. 단일 인스턴스라 백업/복구는 운영자가 직접 관리한다
+  (자동 백업 없음 — 이 프로젝트 규모에서는 감내 가능한 트레이드오프로 채택).
+- **도메인/TLS**: 이번 이슈는 도메인을 사지 않고 EC2 퍼블릭 IP로 HTTP만 서비스한다.
+  Nginx의 TLS 종료(certbot 등)는 도메인이 생기면 별도 후속 이슈로 다룬다(7.25.6).
+  `DJANGO_ALLOWED_HOSTS`는 EC2 퍼블릭 IP(및 필요 시 Elastic IP)로 설정한다.
+- **CI/CD**: 기존 `.github/workflows/ci.yml`의 `test` job 뒤에 `deploy` job을 추가해
+  `dev` 브랜치 push 시 자동 배포한다. `test`가 통과해야 `deploy`가 실행되도록
+  `needs: test`로 묶는다.
+
+#### 7.25.3 EC2 프로비저닝 (수동 작업)
+
+이 저장소에는 AWS CLI/자격 증명이 없어 코드 에이전트가 직접 실행할 수 없다.
+운영자가 AWS 콘솔 또는 CLI로 아래를 수행한다:
+
+1. EC2 인스턴스 생성 — 프리티어 대상 `t2.micro`/`t3.micro`(vCPU 1, RAM 1GiB).
+   Amazon Linux 2023 또는 Ubuntu 22.04, Docker/Docker Compose plugin 설치
+   (`sudo yum install -y docker` 또는 `apt install docker.io docker-compose-plugin`).
+2. RAM 1GiB로는 MySQL+Gunicorn(worker 3)+Nginx 동시 구동 시 OOM 위험이 있다 —
+   swap 파일 1~2GiB를 추가한다(`fallocate`/`mkswap`/`swapon`, `/etc/fstab` 등록).
+3. 보안 그룹: 인바운드 22(SSH, 배포자/GitHub Actions runner IP만 — 가능하면
+   고정 IP로 제한), 80(HTTP, 전체 허용). 아웃바운드는 기본(전체 허용, 외부 API
+   호출에 필요).
+4. 저장소를 EC2에 clone하고 `.env`를 직접 배치한다(`.env`는 git에 커밋하지 않고
+   EC2에서만 생성 — 기존 관례와 동일, `.env.example` 참고).
+   `DJANGO_ALLOWED_HOSTS`에 EC2 퍼블릭 IP를 넣는다.
+5. 최초 기동: `docker compose up --build -d`.
+
+#### 7.25.4 GitHub Actions CD
+
+`.github/workflows/ci.yml`에 `deploy` job을 추가한다. `test`에 이어 실행되도록
+`needs: test`, `dev` push에서만 동작하도록 `if: github.ref == 'refs/heads/dev' &&
+github.event_name == 'push'` 조건을 건다. SSH 접속에는 `appleboy/ssh-action`을
+쓰고, 아래 GitHub Actions repository secrets가 필요하다:
+
+- `EC2_HOST` — EC2 퍼블릭 IP
+- `EC2_SSH_KEY` — 배포 전용 SSH 프라이빗 키(PEM)
+- `EC2_USER` — SSH 접속 계정(`ec2-user`/`ubuntu` 등)
+
+배포 스텝은 EC2에 SSH 접속해 `git pull` 후 `docker compose up -d --build`를
+실행한다. `.env`는 리포지토리에 없으므로 GitHub Actions가 아니라 EC2에 이미
+배치된 파일을 그대로 재사용한다(워크플로에서 `.env`를 새로 만들지 않는다).
+
+```yaml
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    steps:
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd ~/Eodiganam
+            git pull origin dev
+            docker compose up -d --build
+```
+
+#### 7.25.5 완료 조건 매핑
+
+| 완료 조건 | 대응 |
+| --- | --- |
+| EC2에서 `docker compose up`으로 MySQL+app+Nginx 기동 | 7.25.3 |
+| `http://<EC2 퍼블릭 IP>/`로 API 응답 확인 | 7.25.3 |
+| `dev` push 시 CI 통과 후 자동 배포 | 7.25.4 |
+| `.env`가 저장소/워크플로에 커밋되지 않음 | 7.25.3, 7.25.4 |
+
+#### 7.25.6 미해결 사항
+
+- 도메인 확보 후 TLS(certbot 또는 ACM+ALB) 적용은 별도 후속 이슈.
+- 단일 인스턴스 DB 백업/복구 절차(예: 정기 `mysqldump` → S3)는 이번 범위 밖 —
+  운영 중 데이터 유실 위험을 인지하고 있어야 한다.
+- 배포 실패 시 롤백 전략(이전 이미지로 재기동 등)은 정의하지 않았다 — 배포
+  빈도가 낮은 현재 단계에서는 수동 대응으로 충분하다고 판단.
+- swap 크기/인스턴스 사양은 운영 중 실제 메모리 사용량을 보고 조정한다.
+
+### 7.26 CORS 설정
+
+#### 7.26.1 범위와 배경
+
+프론트엔드가 브라우저에서 이 API를 직접 호출하려면 CORS 허용이 필요한데, 지금까지는
+`django-cors-headers` 자체가 설치돼 있지 않았다. 프론트엔드 실제 배포 origin은 아직
+정해지지 않은 상태(2026-08-11 확인)라, origin 목록을 하드코딩하지 않고 환경별로 다르게
+설정할 수 있게 만든다.
+
+#### 7.26.2 결정 사항
+
+- `django-cors-headers`를 추가하고 `corsheaders.middleware.CorsMiddleware`를
+  `SecurityMiddleware` 바로 다음, `CommonMiddleware`보다 앞에 둔다(라이브러리 요구사항).
+- **dev**: `CORS_ALLOWED_ORIGINS`에 로컬 프론트 개발 서버로 흔히 쓰는
+  `localhost`/`127.0.0.1`의 `3000`(CRA/Next.js)·`5173`(Vite) 포트를 하드코딩한다 —
+  `ALLOWED_HOSTS`가 dev에서 `127.0.0.1`/`localhost`를 하드코딩하는 것과 같은 패턴(7.22.2).
+- **prod**: `CORS_ALLOWED_ORIGINS` env(콤마 구분)를 읽되, `DJANGO_ALLOWED_HOSTS`와
+  달리 **기본값을 빈 리스트로 둔다**(필수로 강제하지 않음). 이 env가 미설정이어도
+  Django가 기동을 거부하지 않고 단순히 브라우저 cross-origin 요청만 막힌다(서버 대
+  서버 호출·curl·Swagger UI 직접 접속은 영향 없음). `DJANGO_ALLOWED_HOSTS`를 필수로
+  강제한 이유(7.22.2)는 그게 없으면 Django 자체가 모든 요청을 400으로 거부하는
+  보안 필수값이기 때문이고, CORS는 프론트 연동이 아직 붙지 않은 지금 필수로
+  강제하면 이미 배포되어 돌아가는 인스턴스(#46)가 다음 자동 배포 때 `.env`에 값이
+  없어 기동 실패로 이어진다 — 그 위험을 피하기 위한 의도적 차이.
+- 인증은 `JWTAuthentication`(Authorization 헤더)만 쓰고 세션/쿠키 인증이 없으므로
+  `CORS_ALLOW_CREDENTIALS`는 설정하지 않는다(불필요).
+
+#### 7.26.3 테스트 관점
+
+`tests/test_project_setup.py`에 3개 추가: `corsheaders` 앱/미들웨어 등록 확인,
+dev에 설정된 origin으로 요청 시 `Access-Control-Allow-Origin` 헤더가 실려오는지,
+설정되지 않은 origin은 헤더가 없는지.
+
+#### 7.26.4 미해결 사항
+
+- 실제 프론트엔드 배포 origin이 정해지면 prod `.env`의 `CORS_ALLOWED_ORIGINS`에
+  추가해야 한다 — 코드 변경 없이 EC2의 `.env` 수정 + 컨테이너 재기동만으로 반영된다.
+- 프론트가 여러 환경(스테이징/프로덕션)을 쓰게 되면 콤마 구분 목록에 각각 추가한다.
+
 ## 8. 단계별 구현 계획
 
 - **Stage 0** — Django 프로젝트 뼈대: `config/` 생성, MySQL 연결, 빈 상태로 `manage.py migrate`/`runserver` 동작 확인. 도메인 앱 없음.

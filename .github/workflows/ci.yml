@@ -72,3 +72,4 @@ jobs:
             cd ~/Eodiganam
             git pull origin dev
             docker compose up -d --build
+            docker compose up -d --force-recreate nginx

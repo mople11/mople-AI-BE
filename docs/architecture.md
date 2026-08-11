@@ -2788,6 +2788,45 @@ dev에 설정된 origin으로 요청 시 `Access-Control-Allow-Origin` 헤더가
   추가해야 한다 — 코드 변경 없이 EC2의 `.env` 수정 + 컨테이너 재기동만으로 반영된다.
 - 프론트가 여러 환경(스테이징/프로덕션)을 쓰게 되면 콤마 구분 목록에 각각 추가한다.
 
+### 7.27 구조화 로깅
+
+#### 7.27.1 범위와 배경
+
+프로젝트 전체에 `logging` 사용이 0건이었다. 특히 `common/exception_handler.py`는
+DRF `exception_handler`가 처리하지 못한 예외(순수 버그)를 잡아 `COMMON_500` JSON으로
+변환하기만 하고 **어디에도 기록하지 않았다** — 운영 중 버그가 나도 컨테이너 로그에
+아무 흔적이 남지 않는 상태였다. Sentry 같은 외부 에러 트래킹 SaaS는 가입 절차가
+필요해 이번에는 범위에서 제외하고(사용자 결정), Django 표준 `LOGGING` 설정과
+예외 핸들러 로깅만 추가한다(0절 원칙 3, 원칙 1 — 범위를 좁게 유지).
+
+#### 7.27.2 결정 사항
+
+- `config/settings/base.py`에 `LOGGING` dict 추가. 핸들러는 `console`
+  (`logging.StreamHandler`) 하나뿐이다 — 컨테이너 표준출력에 쓰면 `docker compose
+  logs`가 그대로 수집하므로 별도 파일 핸들러나 로테이션을 만들지 않는다(0절 원칙 3,
+  EC2가 단일 인스턴스라 파일 로테이션 인프라를 갖추는 비용이 이득보다 큼).
+- `root` 로거 레벨은 base에서 `INFO`, `dev.py`에서 `DEBUG`로 올린다(SQL 쿼리 등
+  상세 로그 확인용). `prod.py`는 base의 `INFO`를 그대로 쓴다(별도 설정 불필요).
+- `common/exception_handler.py`가 `response is None`(DRF가 처리 못 한 순수 예외)
+  또는 `status_code >= 500` 분기에서 `logger.error(..., exc_info=exc)`로 요청
+  메서드·경로와 함께 트레이스백을 남긴다. 4xx(`ApiError`/`ValidationError`/인증
+  실패 등 예상된 클라이언트 에러)는 로그를 남기지 않는다 — 정상적인 클라이언트
+  요청 실패까지 ERROR로 채우면 실제 버그 신호가 묻힌다.
+
+#### 7.27.3 테스트 관점
+
+`tests/test_common_exception_handler.py`(신규): `custom_exception_handler`를 가짜
+DRF `Request` 컨텍스트로 직접 호출해, 처리되지 않은 예외는 `caplog`로 ERROR 로그
+1건과 `exc_info`가 남는지, `ValidationError` 같은 클라이언트 에러는 로그가 전혀
+없는지 확인한다.
+
+#### 7.27.4 미해결 사항
+
+- 에러 트래킹(Sentry 등)은 이번 범위에서 제외했다 — 필요해지면 외부 계정 가입이
+  선행되어야 하는 별도 후속 이슈.
+- 요청 단위 접근 로그(access log)는 추가하지 않았다 — Nginx가 이미 자체 access
+  log를 남기므로 애플리케이션 레벨에서 중복 구현하지 않는다(0절 원칙 3).
+
 ## 8. 단계별 구현 계획
 
 - **Stage 0** — Django 프로젝트 뼈대: `config/` 생성, MySQL 연결, 빈 상태로 `manage.py migrate`/`runserver` 동작 확인. 도메인 앱 없음.

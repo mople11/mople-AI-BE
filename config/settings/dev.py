@@ -1,5 +1,5 @@
 from .base import *  # noqa: F403
-from .base import env
+from .base import LOGGING, env
 
 
 SECRET_KEY = env("DJANGO_SECRET_KEY", default="change-me-in-env")
@@ -10,3 +10,6 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
+
+LOGGING["root"]["level"] = "DEBUG"
+LOGGING["loggers"]["django"]["level"] = "DEBUG"

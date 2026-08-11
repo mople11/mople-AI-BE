@@ -1,8 +1,12 @@
+import logging
+
 from rest_framework.exceptions import AuthenticationFailed, NotAuthenticated, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import exception_handler
 
 from common.exceptions import ApiError, ErrorCode
+
+logger = logging.getLogger(__name__)
 
 
 def _error_response(error_code: ErrorCode, details=None) -> Response:
@@ -32,6 +36,11 @@ def custom_exception_handler(exc, context):
         return _error_response(ErrorCode.AUTH_401)
 
     if response is None or response.status_code >= 500:
+        request = context["request"]
+        logger.error(
+            "Unhandled exception on %s %s", request.method, request.path,
+            exc_info=exc,
+        )
         return _error_response(ErrorCode.COMMON_500)
 
     if response.status_code == 404:

@@ -2,10 +2,11 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from common.serializers import PageQuerySerializer
 from places.models import TouristSpot
 
 
-class SpotSearchQuerySerializer(serializers.Serializer):
+class SpotSearchQuerySerializer(PageQuerySerializer):
     keyword = serializers.CharField(required=False, allow_blank=True)
     category = serializers.ChoiceField(required=False, choices=["맛집", "관광지", "숙박", "축제"])
     region = serializers.CharField(required=False, allow_blank=True)
@@ -87,4 +88,3 @@ class PlacesErrorResponseSerializer(serializers.Serializer):
     success = serializers.BooleanField()
     data = serializers.JSONField(allow_null=True)
     error = serializers.JSONField()
-

@@ -96,6 +96,9 @@ def test_list_reviews_latest_without_authentication(api_client, user, spot):
     assert [item["reviewId"] for item in response.data["data"]["reviews"]] == [str(second.id), str(first.id)]
     assert response.data["data"]["reviews"][0]["author"] == "여행자"
     assert response.data["data"]["reviews"][0]["photos"] == ["https://example.com/photo.jpg"]
+    assert response.data["data"]["pagination"] == {
+        "page": 1, "pageSize": 20, "totalCount": 2, "totalPages": 1,
+    }
 
 
 def test_list_reviews_by_rating(api_client, user, spot):
@@ -110,6 +113,34 @@ def test_list_reviews_by_rating(api_client, user, spot):
 
 def test_list_reviews_rejects_non_numeric_target_id(api_client):
     response = api_client.get("/api/v1/reviews", {"targetId": "not-a-number"})
+
+    assert response.status_code == 422
+    assert response.data["error"]["code"] == "COMMON_422"
+
+
+def test_list_reviews_paginates_and_returns_empty_for_page_past_end(api_client, user, spot):
+    reviews = [
+        Review.objects.create(user=user, place=spot, rating=rating, content=str(rating))
+        for rating in (1, 2, 3)
+    ]
+
+    second = api_client.get(
+        "/api/v1/reviews", {"targetId": spot.id, "page": 2, "pageSize": 2}
+    )
+    past_end = api_client.get(
+        "/api/v1/reviews", {"targetId": spot.id, "page": 3, "pageSize": 2}
+    )
+
+    assert [item["reviewId"] for item in second.data["data"]["reviews"]] == [str(reviews[0].id)]
+    assert second.data["data"]["pagination"] == {
+        "page": 2, "pageSize": 2, "totalCount": 3, "totalPages": 2,
+    }
+    assert past_end.data["data"]["reviews"] == []
+
+
+@pytest.mark.parametrize("params", [{"page": 0}, {"pageSize": 51}])
+def test_list_reviews_rejects_invalid_pagination(api_client, spot, params):
+    response = api_client.get("/api/v1/reviews", {"targetId": spot.id, **params})
 
     assert response.status_code == 422
     assert response.data["error"]["code"] == "COMMON_422"

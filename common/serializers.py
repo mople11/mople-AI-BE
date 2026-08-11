@@ -63,3 +63,17 @@ class UserSettingsUpdateSerializer(StrictSerializer):
             )
         attrs["_flattened"] = fields
         return attrs
+
+
+class PageQuerySerializer(serializers.Serializer):
+    page = serializers.IntegerField(required=False, min_value=1, default=1)
+    pageSize = serializers.IntegerField(
+        required=False, min_value=1, max_value=50, default=20
+    )
+
+
+class PaginationMetaSerializer(serializers.Serializer):
+    page = serializers.IntegerField()
+    pageSize = serializers.IntegerField()
+    totalCount = serializers.IntegerField()
+    totalPages = serializers.IntegerField()

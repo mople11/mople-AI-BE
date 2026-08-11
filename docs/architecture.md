@@ -2307,6 +2307,295 @@ WhiteNoise는 추가하지 않고 Nginx가 정적파일을 직접 서빙한다. 
 - prod 설정에서 `DJANGO_SECRET_KEY`와 콤마 구분 `DJANGO_ALLOWED_HOSTS`가 로드되는지, secret 누락 시 즉시 실패하는지 확인한다.
 - `docker compose up --build`로 MySQL, app, Nginx를 함께 기동해 Nginx 경유 API 응답과 `/static/` 아래 admin·DRF 문서 UI 정적파일 응답을 확인한다.
 
+### 7.23 목록 API 페이지네이션 공통 계약 (백로그, `feature/pagination`, GitHub 이슈 #42 기준)
+
+GitHub 이슈 #42 근거. 대상은 지금까지 만든 목록형 API 5개다: 통합 검색(`GET /search`,
+`places/views.py`의 `SpotSearchView.get`), 후기 목록(`GET /reviews`,
+`reviews/views.py`의 `ReviewCollectionView.get`), 마이페이지 목록 3종
+(`GET /users/me/courses`/`MyCoursesView`, `GET /users/me/reviews`/`MyReviewsView`,
+`GET /users/me/likes`/`MyLikesView`, 전부 `mypage/views.py`). 5개 다 지금은 전체
+목록을 페이지네이션 없이 반환한다. Notion API spec에 이 5개 엔드포인트 전부
+페이지네이션 파라미터가 없고(REQUEST가 빈 객체), Figma에도 아직 목록형 화면이
+없어(2026-08-11 확인) UI 기준 page size를 참고할 수 없었다 — 아래 계약은 이번
+이슈에서 직접 정한 잠정 결정이다(7.23.9).
+
+#### 7.23.1 공통 계약
+
+- 쿼리 파라미터: `page`(1부터 시작, 기본 1), `pageSize`(기본 20, 최대 50). limit/offset
+  대신 page/pageSize를 쓴다 — 프론트가 페이지 번호 UI를 쓰는 경우 더 직관적이고,
+  기존 쿼리 시리얼라이저 검증 패턴(`IntegerField(min_value=..., max_value=...)`)을
+  그대로 재사용할 수 있기 때문.
+- 응답: `common.response.ApiResponse`의 `data` 안에 기존 리스트 키
+  (`results`/`reviews`/`courses`/`places`)는 그대로 두고, 그 옆에
+  `pagination: {page, pageSize, totalCount, totalPages}` 객체를 추가한다 — 기존
+  리스트 키 이름·최상위 `data` 구조는 하위 호환을 위해 유지한다(요청되지 않은
+  응답 계약 변경을 하지 않는다).
+- `page`/`pageSize`가 각각의 허용 범위(최소 1, `pageSize`는 최대 50)를 벗어나면
+  조용히 clamp하지 않고 기존 관례대로 `COMMON_422`로 거부한다 — 값 자체가
+  시리얼라이저 필드 검증을 통과하지 못하므로 `common/exception_handler.py`의
+  기존 `ValidationError → COMMON_422` 경로를 그대로 타고, 새 에러 코드는 필요
+  없다.
+- **`page`가 유효 범위 안이지만 실제 데이터 대비 범위를 벗어난 경우**(예: 총 2
+  페이지인데 `page=5` 요청)는 에러가 아니다 — 다른 목록 API가 "결과 없음"을
+  항상 빈 배열로 응답해온 기존 관례(7.11.6 통합 검색 `results: []`, 7.15.5 후기
+  목록 `reviews: []` 등)를 그대로 따라 해당 리스트 키를 빈 배열로,
+  `pagination`은 실제 `totalCount`/`totalPages` 값 그대로 응답한다(구현 방식은
+  7.23.2).
+- 기본 20 / 최대 50은 Figma 디자인이 없는 상태에서 정한 REST 관례값이다 — 목록형
+  화면 디자인이 나오면 재조정한다(7.23.9).
+
+#### 7.23.2 `common/pagination.py` — 공통 헬퍼 (신규 파일)
+
+Django 기본 `Paginator`를 그대로 쓴다(0절 원칙 3) — 커스텀 슬라이싱 로직을 새로
+만들지 않는다. `Paginator`는 QuerySet뿐 아니라 `__len__`/슬라이싱을 지원하는 일반
+`list`도 그대로 받아들이므로, `places.services.search_spots`처럼 QuerySet이 아니라
+평범한 `list[TouristSpot]`을 반환하는 서비스(TourAPI 응답을 매 요청 upsert한 뒤
+파이썬 리스트로 모은 결과라 QuerySet이 아니다 — 7.11.5)에도 같은 헬퍼를 그대로
+쓸 수 있다.
+
+```python
+# common/pagination.py
+from django.core.paginator import EmptyPage, Paginator
+
+
+def paginate_queryset(queryset, *, page: int, page_size: int) -> tuple[list, dict]:
+    paginator = Paginator(queryset, page_size)
+    try:
+        items = list(paginator.page(page))
+    except EmptyPage:
+        items = []
+    return items, {
+        "page": page,
+        "pageSize": page_size,
+        "totalCount": paginator.count,
+        "totalPages": paginator.num_pages if paginator.count else 0,
+    }
+```
+
+- `Paginator.page(page)`가 범위를 벗어나면 `EmptyPage`를 던지는데(예: 데이터가
+  12개, `pageSize=20`, `page=3`), 이걸 잡아 빈 리스트로 대체한다 — 7.23.1의 "데이터
+  범위 초과는 에러가 아니다" 결정을 그대로 구현한 것이다.
+- `page` 자체가 1 미만이면 `Paginator`도 `EmptyPage`를 던지지만, 이 경로엔 절대
+  도달하지 않는다 — 호출부(7.23.5)의 쿼리 시리얼라이저가 `min_value=1`로 이미
+  걸러서 여기 도달하기 전에 `COMMON_422`가 나간다.
+- Django `Paginator.num_pages`는 데이터가 0개여도 기본적으로 `1`을 반환한다
+  (`allow_empty_first_page` 기본값 때문에 `max(1, ...)`로 계산). 이 프로젝트가
+  "결과 없음"이면 자연스럽게 `0`을 기대하는 기존 관례(7.23.1)에 맞춰
+  `paginator.count`가 0이면 `totalPages`도 명시적으로 `0`으로 덮어쓴다 — Django
+  기본값을 그대로 노출하지 않는 의도적 처리다.
+- 반환 타입을 dataclass가 아니라 plain dict로 한 이유: 이 헬퍼의 유일한 소비처는
+  뷰의 `ApiResponse(data={...})` 조립이고, 이 코드베이스의 다른 서비스 계층도 뷰에
+  바로 넘길 응답 dict는 dataclass 없이 만든다(예: `places.services.get_congestion`)
+  — 여기서도 같은 관례를 따른다.
+
+#### 7.23.3 `common/serializers.py` — 공통 쿼리/응답 필드 추가
+
+`common/serializers.py`는 이미 `common` 앱을 벗어나 다른 앱에서 재사용하는 게
+자연스러운 위치다(`common/exceptions.py`의 `ErrorCode`/`ApiError`, `common/response.py`의
+`ApiResponse`가 이미 전 앱에서 import되는 것과 같은 위치 규칙). `page`/`pageSize`
+검증 필드를 5개 쿼리 시리얼라이저에 각각 따로 선언하지 않고, 여기 mixin 하나로
+만들어 상속받게 한다(0절 원칙 3 — 동일한 두 필드를 5번 반복 정의하지 않는다).
+
+```python
+# common/serializers.py (기존 클래스들 아래에 추가)
+class PageQuerySerializer(serializers.Serializer):
+    page = serializers.IntegerField(required=False, min_value=1, default=1)
+    pageSize = serializers.IntegerField(required=False, min_value=1, max_value=50, default=20)
+
+
+class PaginationMetaSerializer(serializers.Serializer):
+    page = serializers.IntegerField()
+    pageSize = serializers.IntegerField()
+    totalCount = serializers.IntegerField()
+    totalPages = serializers.IntegerField()
+```
+
+`PageQuerySerializer`는 요청 쿼리 파라미터 검증용(7.23.4에서 상속), `PaginationMetaSerializer`는
+drf-spectacular 응답 스키마 조립용(7.23.6)이다.
+
+#### 7.23.4 요청 쿼리 시리얼라이저 변경
+
+| 파일 | 클래스 | 변경 |
+| --- | --- | --- |
+| `places/serializers.py` | `SpotSearchQuerySerializer` | `serializers.Serializer` 대신 `PageQuerySerializer` 상속 |
+| `reviews/serializers.py` | `ReviewListQuerySerializer` | 〃 |
+| `mypage/serializers.py` | `MypageListQuerySerializer`(신규) | `PageQuerySerializer`를 그대로 상속만 하는 빈 클래스 — `MyCoursesView`/`MyReviewsView`/`MyLikesView` 3개 뷰가 공유(세 뷰 다 지금은 쿼리 파라미터가 전혀 없어, 굳이 3개로 나눌 이유가 없다) |
+
+`places/serializers.py`:
+```python
+from common.serializers import PageQuerySerializer
+
+
+class SpotSearchQuerySerializer(PageQuerySerializer):
+    keyword = serializers.CharField(required=False, allow_blank=True)
+    category = serializers.ChoiceField(required=False, choices=["맛집", "관광지", "숙박", "축제"])
+    region = serializers.CharField(required=False, allow_blank=True)
+    sort = serializers.CharField(required=False, allow_blank=True)
+```
+(`SpotDetailQuerySerializer`/`TrafficQuerySerializer`는 목록 API가 아니므로 변경하지 않는다.)
+
+`reviews/serializers.py`:
+```python
+from common.serializers import PageQuerySerializer
+
+
+class ReviewListQuerySerializer(PageQuerySerializer):
+    targetId = serializers.IntegerField()
+    sort = serializers.ChoiceField(choices=["latest", "rating"], required=False, default="latest")
+```
+(`ReviewCreateSerializer`/`ReviewSummaryQuerySerializer`/`ReviewReportSerializer`는 목록
+API가 아니므로 변경하지 않는다 — `GET /reviews/summary`는 7.21절에서 이미 "페이지
+없이 항상 전체 집계"로 확정된 요약 API라 이번 범위에 포함하지 않는다.)
+
+`mypage/serializers.py`:
+```python
+from common.serializers import PageQuerySerializer
+
+
+class MypageListQuerySerializer(PageQuerySerializer):
+    pass
+```
+(`ProfileSerializer`/`ProfileUpdateSerializer` 등 목록이 아닌 나머지 시리얼라이저는
+변경하지 않는다.)
+
+#### 7.23.5 뷰 변경
+
+5개 뷰 전부 같은 패턴이다: 쿼리 시리얼라이저로 `page`/`pageSize`를 검증하고,
+기존 서비스 함수가 반환하는 전체 QuerySet/list를 `paginate_queryset`에 넘겨
+`(items, pagination)`을 받은 뒤, 기존 아이템 시리얼라이저에는 `items`만 넘기고
+응답 `data`에 `pagination`을 추가한다. 서비스 계층(`search_spots`/`list_reviews`/
+`get_saved_courses`/`get_my_reviews`/`get_liked_places`)은 변경하지 않는다 — 이
+5개는 전부 지금도 정렬까지 끝난 전체 QuerySet(또는 list)을 반환하므로, "몇 개를
+가져올지"만 뷰 계층에서 자르면 된다.
+
+`places/views.py`(`SpotSearchView.get`, `from common.pagination import paginate_queryset` 추가):
+```python
+def get(self, request):
+    query = SpotSearchQuerySerializer(data=request.query_params)
+    query.is_valid(raise_exception=True)
+    values = query.validated_data
+    spots = search_spots(
+        keyword=values.get("keyword"), category=values.get("category"),
+        region=values.get("region"), sort=values.get("sort"),
+    )
+    items, pagination = paginate_queryset(spots, page=values["page"], page_size=values["pageSize"])
+    return ApiResponse(data={
+        "results": SpotSearchResultSerializer(items, many=True).data,
+        "pagination": pagination,
+    })
+```
+
+`reviews/views.py`(`ReviewCollectionView.get`만 변경, `post`는 그대로):
+```python
+def get(self, request):
+    serializer = ReviewListQuerySerializer(data=request.query_params)
+    serializer.is_valid(raise_exception=True)
+    values = serializer.validated_data
+    reviews = list_reviews(target_id=values["targetId"], sort=values["sort"])
+    items, pagination = paginate_queryset(reviews, page=values["page"], page_size=values["pageSize"])
+    return ApiResponse(data={
+        "reviews": ReviewListItemSerializer(items, many=True).data,
+        "pagination": pagination,
+    })
+```
+
+`mypage/views.py`(`MyCoursesView`/`MyReviewsView`/`MyLikesView`, 3개 다 같은 패턴):
+```python
+class MyCoursesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary="저장한 코스 목록 조회", operation_id="mypage_courses_list", tags=["Mypage"],
+        parameters=[MypageListQuerySerializer],
+        responses={200: CoursesResponse, 401: MypageErrorResponseSerializer, 422: MypageErrorResponseSerializer},
+    )
+    def get(self, request):
+        query = MypageListQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        values = query.validated_data
+        courses = get_saved_courses(user=request.user)
+        items, pagination = paginate_queryset(courses, page=values["page"], page_size=values["pageSize"])
+        return ApiResponse(data={
+            "courses": SavedCourseSerializer(items, many=True).data,
+            "pagination": pagination,
+        })
+```
+`MyReviewsView`/`MyLikesView`도 각각 `get_my_reviews`/`get_liked_places` +
+`MyReviewSerializer`/`LikedPlaceSerializer` + `"reviews"`/`"places"` 키로 동일하게
+바꾸고, `@extend_schema`에 `parameters=[MypageListQuerySerializer]`와
+`422: MypageErrorResponseSerializer`를 추가한다 — 지금은 셋 다 쿼리 파라미터가
+없어서 `parameters`/`422` 응답이 아예 선언돼 있지 않다(이번에 처음 생긴다).
+`MeView`(프로필 조회/수정)는 목록 API가 아니므로 변경하지 않는다.
+
+#### 7.23.6 drf-spectacular 응답 스키마 변경
+
+5개 응답 스키마(`places/views.py`의 `SearchResponse`, `reviews/views.py`의
+`ListResponse`, `mypage/views.py`의 `CoursesResponse`/`ReviewsResponse`/`LikesResponse`)
+전부 데이터 부분 `inline_serializer`에 `"pagination": PaginationMetaSerializer()`
+필드를 추가한다. 예시(`places/views.py`):
+
+```python
+from common.serializers import PaginationMetaSerializer
+
+SearchResponse = inline_serializer("SpotSearchSuccess", fields={
+    "success": serializers.BooleanField(),
+    "data": inline_serializer("SpotSearchData", fields={
+        "results": SpotSearchResultSerializer(many=True),
+        "pagination": PaginationMetaSerializer(),
+    }),
+    "error": serializers.JSONField(allow_null=True),
+})
+```
+나머지 4개(`ListResponse`/`CoursesResponse`/`ReviewsResponse`/`LikesResponse`)도
+같은 방식으로 내부 `inline_serializer`의 `fields`에 `"pagination": PaginationMetaSerializer()`
+한 줄만 추가한다.
+
+#### 7.23.7 테스트 관점
+
+새 테스트 파일을 만들지 않고 5개 엔드포인트를 이미 다루는 기존 파일에 케이스를
+추가한다: `tests/test_places_search.py`, `tests/test_reviews.py`,
+`tests/test_mypage_api.py`(코스/후기/찜 3개 목록 전부). 각 파일에 공통으로
+추가할 케이스:
+
+- 기본 호출(`page`/`pageSize` 쿼리 없음): `pagination.page == 1`,
+  `pagination.pageSize == 20`, `pagination.totalCount`가 실제 생성한 fixture
+  개수와 일치.
+- `pageSize`를 fixture 개수보다 작게 줘서 2페이지 이상 만들고 `page=2` 요청 시
+  두 번째 페이지 항목만 오는지 확인(항목 개수와 내용으로 검증 — 정렬 기준은
+  각 서비스가 이미 쓰는 것 그대로: 검색은 TourAPI 응답 순, 후기는 `sort`,
+  마이페이지 3종은 `mypage/services.py`의 기존 정렬).
+- `page`가 `totalPages`보다 큰 값: 200 응답, 리스트 키는 빈 배열, `pagination`은
+  실제 `totalCount`/`totalPages` 값 그대로(7.23.1의 "데이터 범위 초과는 에러
+  아님" 검증).
+- `pageSize=51`(또는 그 이상): `COMMON_422`.
+- `page=0`(또는 음수): `COMMON_422`.
+- 결과가 0건인 기존 케이스(예: 검색 결과 없음)에서 `pagination.totalCount == 0`,
+  `pagination.totalPages == 0`인지 확인(Django `Paginator` 기본값 `1`을 덮어쓴
+  7.23.2의 결정 검증).
+
+#### 7.23.8 완료 조건 매핑 (이슈 #42)
+
+| 이슈 완료 조건 | 대응 |
+| --- | --- |
+| 5개 목록 API 모두 `page`/`pageSize` 쿼리 파라미터 지원 | 7.23.4 |
+| 응답 `data`에 `pagination.{page,pageSize,totalCount,totalPages}` 포함 | 7.23.2, 7.23.5, 7.23.6 |
+| `pageSize` 50 초과 또는 `page`/`pageSize` 1 미만 → 422 | 7.23.1, 7.23.3(필드 검증), 7.23.7 |
+| 기존 리스트 키/응답 최상위 구조 하위 호환 유지 | 7.23.1, 7.23.5 |
+| pytest 전체 통과 | 7.23.7 |
+
+#### 7.23.9 미해결 사항
+
+- 기본 20 / 최대 50은 Figma 디자인이 없는 상태에서 REST 관례값으로 정한 잠정치다.
+  목록형 화면 디자인이 나오면 실제 카드 개수 기준으로 재조정한다.
+- `totalCount` 계산을 위한 `Paginator.count`(내부적으로 `COUNT` 쿼리 또는
+  `len()`)가 대량 데이터에서 성능에 영향을 줄 수 있다. 운영 데이터가 쌓인 뒤
+  필요하면 커서 기반 페이지네이션으로 전환을 검토한다.
+- `places.services.search_spots`는 매 요청 TourAPI를 실시간 호출해 전체 결과를
+  받아온 뒤에야 페이지를 자른다 — 이미 받아온 데이터를 다시 자르는 것뿐이라
+  TourAPI 호출 횟수 자체는 늘지 않지만, TourAPI가 대량의 결과를 주는 키워드에서는
+  이 구조상 응답 지연이 페이지 번호와 무관하게 항상 "전체 조회" 비용만큼 든다.
+  TourAPI 자체 페이지네이션 파라미터 연동은 이번 범위 밖이다.
+
 ## 8. 단계별 구현 계획
 
 - **Stage 0** — Django 프로젝트 뼈대: `config/` 생성, MySQL 연결, 빈 상태로 `manage.py migrate`/`runserver` 동작 확인. 도메인 앱 없음.

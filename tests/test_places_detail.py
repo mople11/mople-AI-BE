@@ -4,8 +4,10 @@ from unittest.mock import patch
 import pytest
 from django.utils import timezone
 
+from accounts.models import User
 from places.models import TouristSpot
 from places.tourapi import RawSpot, TourApiClient
+from reviews.models import Review
 
 
 def create_spot(**overrides):
@@ -16,6 +18,19 @@ def create_spot(**overrides):
 
 def detail_raw():
     return RawSpot(content_id="100", name="순천만 국가정원", category="ATTRACTION", address="전라남도 순천시", description="설명", hours="09:00~18:00", latitude=Decimal("34.885"), longitude=Decimal("127.509"), parking_available=True, image_urls=["https://example.com/1.jpg"])
+
+
+def create_reviews(*, spot, ratings):
+    user = User.objects.create_user(
+        username=f"detail-reviewer-{spot.id}",
+        email=f"detail-reviewer-{spot.id}@example.com",
+        nickname=f"상세 리뷰어 {spot.id}",
+        password="safe-password-123",
+    )
+    return Review.objects.bulk_create([
+        Review(user=user, place=spot, rating=rating, content=f"평점 {rating}")
+        for rating in ratings
+    ])
 
 
 @pytest.mark.django_db
@@ -37,6 +52,42 @@ def test_detail_without_location_has_null_distance(mock_detail, api_client):
     spot = create_spot()
     response = api_client.get(f"/api/v1/places/{spot.id}")
     assert response.data["data"]["distanceFromUser"] is None
+
+
+@pytest.mark.django_db
+@patch("places.services.TourApiClient.get_spot_detail", return_value=detail_raw())
+def test_detail_returns_average_and_null_summary_below_minimum(mock_detail, api_client):
+    spot = create_spot()
+    create_reviews(spot=spot, ratings=(3, 4, 5))
+
+    response = api_client.get(f"/api/v1/places/{spot.id}")
+
+    assert response.status_code == 200
+    assert response.data["data"]["reviewSummary"] == {
+        "avgRating": 4.0,
+        "aiSatisfaction": None,
+    }
+
+
+@pytest.mark.django_db
+@patch("places.services.get_review_summary")
+@patch("places.services.TourApiClient.get_spot_detail", return_value=detail_raw())
+def test_detail_reuses_review_summary_result(mock_detail, mock_summary, api_client):
+    spot = create_spot()
+    create_reviews(spot=spot, ratings=(3, 4, 4, 5, 5))
+    mock_summary.return_value = {
+        "score": 86,
+        "keywords": {"positive": ["경치"], "negative": ["혼잡"]},
+    }
+
+    response = api_client.get(f"/api/v1/places/{spot.id}")
+
+    assert response.status_code == 200
+    assert response.data["data"]["reviewSummary"] == {
+        "avgRating": 4.2,
+        "aiSatisfaction": mock_summary.return_value,
+    }
+    mock_summary.assert_called_once_with(target_id=spot.id)
 
 
 @pytest.mark.django_db

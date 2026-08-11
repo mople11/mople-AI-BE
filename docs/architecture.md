@@ -905,7 +905,7 @@ Notion 페이지: 설정, 온보딩
 
 1. 관광지 집중률은 실시간 현장 인원이나 시간대별 대기시간이 아니라 향후 30일의 일별 예측값이다. 화면과 API에서 이를 실시간 혼잡도로 표현하지 않는다.
 2. 집중률 API 관광지명과 TourAPI 장소명이 일치하지 않는 장소는 빈 데이터로 처리하며, 운영 데이터 확인 후 별도 매핑 테이블 도입을 검토한다.
-3. `rating`(통합 검색), `reviewSummary.avgRating`/`aiSatisfaction`(장소 상세)은 `reviews`/`interactions` 앱(Stage 4) 완료 전까지 고정값(`0`/`null`)으로 응답한다. Stage 4 완료 후 실제 집계값으로 교체한다.
+3. **[해결]** `rating`(통합 검색), `reviewSummary.avgRating`/`aiSatisfaction`(장소 상세)의 고정값은 실제 리뷰 집계값으로 교체한다. 계산 방식과 응답 규칙은 7.24절을 따른다.
 4. `sort` 쿼리 파라미터는 Notion 명세에 구체적 옵션이 없다 — 현재는 값을 받기만 하고 실제 정렬에는 반영하지 않는다(TourAPI 기본 정렬 그대로 반환). 통합 검색 페이지네이션도 노출하지 않는다. 프론트 요구사항 확인 후 별도 확정.
 5. 캐시 TTL 만료·오래된 `TouristSpot`/`TouristSpotImage` 정리 배치는 도입하지 않는다. 트래픽이 늘어 TourAPI 호출량이 문제가 되면 재검토.
 
@@ -2595,6 +2595,64 @@ SearchResponse = inline_serializer("SpotSearchSuccess", fields={
   TourAPI 호출 횟수 자체는 늘지 않지만, TourAPI가 대량의 결과를 주는 키워드에서는
   이 구조상 응답 지연이 페이지 번호와 무관하게 항상 "전체 조회" 비용만큼 든다.
   TourAPI 자체 페이지네이션 파라미터 연동은 이번 범위 밖이다.
+
+### 7.24 장소 상세/통합검색 리뷰 집계 반영 (`feature/places-review-aggregation`)
+
+> 7.11.6에서 Stage 4 완료 전까지 고정값으로 둔 통합검색 `rating`과 장소 상세
+> `reviewSummary.avgRating`/`aiSatisfaction`을 실제 리뷰 데이터로 교체한다. 이 작업은
+> 7.21.6에서 `feature/reviews-ai-summary` 범위와 분리한 후속 이슈이며, 기존 API의
+> 필드명과 중첩 구조는 유지하고 값의 계산 방식만 변경한다.
+
+#### 7.24.1 결정 사항
+
+- `avgRating`과 `rating`은 같은 평균 평점이므로 `places/services.py`의 단일 헬퍼
+  `get_avg_rating(place)`에서 계산해 상세와 검색 시리얼라이저가 함께 사용한다
+  (0절 원칙 3). 리뷰가 없으면 `0`, 있으면 `Avg("rating")` 결과를 `round(avg, 1)`로
+  소수점 한 자리까지 반올림한다. 이는 7.11.6의 `distanceFromUser` 반올림 관례와
+  동일하다.
+- `aiSatisfaction`은 `places.services.get_ai_satisfaction(place)` 래퍼를 통해
+  `reviews.services.get_review_summary(target_id=spot.id)`를 재사용한다. 결과가 `{}`이면
+  집계할 AI 데이터가 없다는 의미이므로 `null`, 값이 있으면 `{"score", "keywords"}`
+  dict를 가공하지 않고 그대로 응답한다.
+- `places`가 `reviews.models.Review`와 `reviews.services.get_review_summary`를
+  import한다. `reviews`가 이미 `places.models.TouristSpot`을 참조하지만
+  `places.models`가 `reviews`를 역참조하지 않고 서비스 모듈끼리도 맞물리지 않아
+  순환 import는 발생하지 않는다.
+- 통합검색 결과는 `search_spots`가 반환한 각 장소를 시리얼라이저에서 건별 집계한다.
+  현재 결과 건수가 많지 않은 전제에서 `annotate`나 별도 배치 집계는 도입하지 않고,
+  운영 데이터로 병목이 확인될 때 최적화한다.
+
+#### 7.24.2 서비스 계층 (`places/services.py`)
+
+`get_avg_rating(place: TouristSpot) -> float`를 추가한다. `Review.objects.filter(place=place)`에
+`aggregate(Avg("rating"))`를 적용하고, 집계 결과가 `None`이면 `0.0`, 아니면
+`round(float(avg), 1)`을 반환한다. `get_ai_satisfaction(place) -> dict | None`은 새 계산을
+만들지 않고 `reviews.services.get_review_summary`를 호출해 빈 dict만 `None`으로 변환한다.
+
+#### 7.24.3 시리얼라이저/뷰
+
+- `SpotSearchResultSerializer.get_rating`은 `get_avg_rating(obj)` 결과를 반환한다.
+  평균은 소수일 수 있으므로 drf-spectacular 타입을 정수에서 실수로 변경한다.
+- `SpotDetailSerializer.get_reviewSummary`는 `avgRating`에 `get_avg_rating(obj)`,
+  `aiSatisfaction`에 `get_ai_satisfaction(obj)`를 넣는다.
+- 뷰와 응답 계약은 변경하지 않는다. `rating`, `reviewSummary.avgRating`,
+  `reviewSummary.aiSatisfaction`의 이름과 구조를 그대로 유지한다.
+
+#### 7.24.4 테스트 관점
+
+- `tests/test_places_search.py`: 리뷰가 없는 장소의 `rating: 0`과 리뷰가 있는 장소의
+  실제 평균 및 소수점 한 자리 반올림을 검증한다.
+- `tests/test_places_detail.py`: 리뷰 5개 미만일 때 실제 `avgRating`과
+  `aiSatisfaction: null`을 검증한다. 리뷰 5개 이상일 때는
+  `get_review_summary`를 모킹해 반환 dict가 `aiSatisfaction`에 그대로 들어가는지만
+  확인한다. LLM 호출·캐시 재계산 조건은 7.21.5의 기존 테스트 범위이므로 반복하지 않는다.
+- 리뷰 픽스처는 기존 reviews 테스트와 같이 `Review` ORM 객체를 직접 생성한다.
+
+#### 7.24.5 미해결 사항 갱신
+
+- 7.11.8 미해결 사항 3은 이번 절에서 해결한다.
+- 통합검색의 건별 평균 집계 쿼리는 현재 규모에서 허용한다. 실제 검색 결과 수와
+  쿼리 비용이 문제가 되면 `place_id__in` 배치 집계나 ORM annotation을 후속으로 검토한다.
 
 ## 8. 단계별 구현 계획
 

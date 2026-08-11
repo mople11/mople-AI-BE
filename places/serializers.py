@@ -4,6 +4,7 @@ from rest_framework import serializers
 
 from common.serializers import PageQuerySerializer
 from places.models import TouristSpot
+from places.services import get_ai_satisfaction, get_avg_rating
 
 
 class SpotSearchQuerySerializer(PageQuerySerializer):
@@ -44,9 +45,9 @@ class SpotSearchResultSerializer(serializers.ModelSerializer):
         model = TouristSpot
         fields = ("id", "name", "category", "location", "rating", "thumbnail")
 
-    @extend_schema_field(OpenApiTypes.INT)
-    def get_rating(self, obj) -> int:
-        return 0
+    @extend_schema_field(OpenApiTypes.FLOAT)
+    def get_rating(self, obj) -> float:
+        return get_avg_rating(obj)
 
     @extend_schema_field(OpenApiTypes.URI)
     def get_thumbnail(self, obj) -> str | None:
@@ -81,7 +82,10 @@ class SpotDetailSerializer(serializers.ModelSerializer):
 
     @extend_schema_field({"type": "object"})
     def get_reviewSummary(self, obj) -> dict:
-        return {"avgRating": 0, "aiSatisfaction": None}
+        return {
+            "avgRating": get_avg_rating(obj),
+            "aiSatisfaction": get_ai_satisfaction(obj),
+        }
 
 
 class PlacesErrorResponseSerializer(serializers.Serializer):

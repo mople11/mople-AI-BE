@@ -4,19 +4,24 @@
 
 ## 현재 구현 범위
 
-`docs/architecture.md`의 Stage 1 중 회원가입과 아이디 중복 확인까지 구현되어 있습니다.
+`docs/architecture.md`의 Stage 0~7(MVP 핵심 기능 + 배포 준비)과 백로그까지 전부 구현되어
+있습니다(`docs/roadmap.md` 3절 상태표 기준). Notion 기능명세서의 8개 그룹 API가 모두
+포함됩니다.
 
-- Django/DRF 프로젝트 설정
-- `django-environ` 기반 환경변수
-- PyMySQL을 사용한 MySQL 8 연결
-- MySQL Docker Compose
-- Simple JWT 기본 설정
-- Django Admin 최상위 URL
-- 커스텀 `accounts.User` 모델
-- 회원가입 및 아이디 중복 확인 API
-- 공통 API 응답 및 예외 포맷
-
-로그인, 소셜 로그인, 이메일 발송 및 비밀번호 재설정은 아직 구현하지 않았습니다.
+- **Auth (`accounts`)**: 회원가입/아이디 중복 확인, 이메일 인증코드, 로그인/로그아웃,
+  비밀번호 재설정, 소셜 로그인(Google/Kakao)
+- **검색·정보 (`places`)**: 통합 검색, 장소 상세, 관광지 예상 방문 집중도, 실시간 교통 혼잡
+- **추천 (`courses`)**: 코스 저장/시작/완주인증/공유(`Course`/`CoursePlace`/`CourseProgress`),
+  AI 맞춤 코스 추천, 동선 최적화
+- **후기·만족도 (`reviews`)**: 후기 작성/목록/도움돼요/신고, AI 만족도·키워드 요약
+- **찜하기 (`interactions`)**: 장소 찜하기(Bookmark)
+- **게이미피케이션 (`gamification`)**: 위치 체크인/스탬프북, 숨겨진 여행지/완주 카드
+- **마이페이지 (`mypage`)**: 프로필 조회/수정, 저장한 코스/내 후기/찜한 장소 목록
+- **Home (`home`)**: 날씨 기반 추천 허브(현재 날씨 조회, 메인 홈 데이터)
+- **공통 (`common`)**: 사용자 설정(UserSettings)/온보딩, 목록 API 공통 페이지네이션
+  (`page`/`pageSize`), 공통 응답/예외 포맷
+- **배포**: settings dev/prod 분리, Dockerfile, Docker Compose(MySQL + Gunicorn app +
+  Nginx), CI(GitHub Actions)
 
 ## 개발 환경 실행
 

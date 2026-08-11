@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from common.serializers import PageQuerySerializer
 from reviews.models import Review
 
 
@@ -14,7 +15,7 @@ class ReviewCreateSerializer(serializers.Serializer):
     visitWeather = serializers.CharField(required=False, allow_blank=True, default="")
 
 
-class ReviewListQuerySerializer(serializers.Serializer):
+class ReviewListQuerySerializer(PageQuerySerializer):
     targetId = serializers.IntegerField()
     sort = serializers.ChoiceField(choices=["latest", "rating"], required=False, default="latest")
 

@@ -3,7 +3,9 @@ from rest_framework import serializers
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.views import APIView
 
+from common.pagination import paginate_queryset
 from common.response import ApiResponse
+from common.serializers import PaginationMetaSerializer
 from reviews.serializers import (
     ReviewCreateSerializer, ReviewListItemSerializer, ReviewListQuerySerializer,
     ReviewReportSerializer, ReviewSummaryQuerySerializer, ReviewsErrorResponseSerializer,
@@ -24,7 +26,10 @@ CreateResponse = inline_serializer("ReviewCreateSuccess", fields={
 })
 ListResponse = inline_serializer("ReviewListSuccess", fields={
     "success": serializers.BooleanField(),
-    "data": inline_serializer("ReviewListData", fields={"reviews": ReviewListItemSerializer(many=True)}),
+    "data": inline_serializer("ReviewListData", fields={
+        "reviews": ReviewListItemSerializer(many=True),
+        "pagination": PaginationMetaSerializer(),
+    }),
     "error": serializers.JSONField(allow_null=True),
 })
 HelpfulResponse = inline_serializer("ReviewHelpfulSuccess", fields={
@@ -79,7 +84,13 @@ class ReviewCollectionView(APIView):
         serializer.is_valid(raise_exception=True)
         values = serializer.validated_data
         reviews = list_reviews(target_id=values["targetId"], sort=values["sort"])
-        return ApiResponse(data={"reviews": ReviewListItemSerializer(reviews, many=True).data})
+        items, pagination = paginate_queryset(
+            reviews, page=values["page"], page_size=values["pageSize"]
+        )
+        return ApiResponse(data={
+            "reviews": ReviewListItemSerializer(items, many=True).data,
+            "pagination": pagination,
+        })
 
 
 class ReviewSummaryView(APIView):

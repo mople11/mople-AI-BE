@@ -3,7 +3,9 @@ from rest_framework import serializers
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 
+from common.pagination import paginate_queryset
 from common.response import ApiResponse
+from common.serializers import PaginationMetaSerializer
 from places.serializers import (
     PlacesErrorResponseSerializer, SpotDetailQuerySerializer, SpotDetailSerializer,
     SpotSearchQuerySerializer, SpotSearchResultSerializer, TrafficQuerySerializer,
@@ -15,7 +17,10 @@ from places.services import (
 
 SearchResponse = inline_serializer("SpotSearchSuccess", fields={
     "success": serializers.BooleanField(),
-    "data": inline_serializer("SpotSearchData", fields={"results": SpotSearchResultSerializer(many=True)}),
+    "data": inline_serializer("SpotSearchData", fields={
+        "results": SpotSearchResultSerializer(many=True),
+        "pagination": PaginationMetaSerializer(),
+    }),
     "error": serializers.JSONField(allow_null=True),
 })
 DetailResponse = inline_serializer("SpotDetailSuccess", fields={
@@ -48,7 +53,13 @@ class SpotSearchView(APIView):
             keyword=values.get("keyword"), category=values.get("category"),
             region=values.get("region"), sort=values.get("sort"),
         )
-        return ApiResponse(data={"results": SpotSearchResultSerializer(spots, many=True).data})
+        items, pagination = paginate_queryset(
+            spots, page=values["page"], page_size=values["pageSize"]
+        )
+        return ApiResponse(data={
+            "results": SpotSearchResultSerializer(items, many=True).data,
+            "pagination": pagination,
+        })
 
 
 class SpotDetailView(APIView):

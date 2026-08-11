@@ -181,6 +181,80 @@ def test_mypage_lists_only_authenticated_users_data(authenticated_client, users)
     assert likes_response.data["data"]["places"] == [
         {"placeId": str(spot_a.id), "name": "A 장소"}
     ]
+    for response in (courses_response, reviews_response, likes_response):
+        assert response.data["data"]["pagination"] == {
+            "page": 1, "pageSize": 20, "totalCount": 1, "totalPages": 1,
+        }
+
+
+@pytest.mark.parametrize(
+    "url,list_key",
+    [
+        ("/api/v1/users/me/courses", "courses"),
+        ("/api/v1/users/me/reviews", "reviews"),
+        ("/api/v1/users/me/likes", "places"),
+    ],
+)
+def test_mypage_lists_return_empty_pagination(authenticated_client, url, list_key):
+    response = authenticated_client.get(url)
+
+    assert response.status_code == 200
+    assert response.data["data"][list_key] == []
+    assert response.data["data"]["pagination"] == {
+        "page": 1, "pageSize": 20, "totalCount": 0, "totalPages": 0,
+    }
+
+
+def test_mypage_lists_return_second_page(authenticated_client, users):
+    user, _ = users
+    courses = [Course.objects.create(name=f"코스 {index}") for index in range(2)]
+    for course in courses:
+        CourseProgress.objects.create(
+            user=user, course=course, status=CourseProgress.Status.SAVED
+        )
+    spots = [
+        create_spot(content_id=f"page-{index}", name=f"장소 {index}")
+        for index in range(2)
+    ]
+    reviews = [
+        Review.objects.create(user=user, place=spot, rating=5, content="후기")
+        for spot in spots
+    ]
+    bookmarks = [Bookmark.objects.create(user=user, place=spot) for spot in spots]
+
+    courses_response = authenticated_client.get(
+        "/api/v1/users/me/courses", {"page": 2, "pageSize": 1}
+    )
+    reviews_response = authenticated_client.get(
+        "/api/v1/users/me/reviews", {"page": 2, "pageSize": 1}
+    )
+    likes_response = authenticated_client.get(
+        "/api/v1/users/me/likes", {"page": 2, "pageSize": 1}
+    )
+
+    assert courses_response.data["data"]["courses"][0]["courseId"] == str(courses[0].id)
+    assert reviews_response.data["data"]["reviews"][0]["reviewId"] == str(reviews[0].id)
+    assert likes_response.data["data"]["places"][0]["placeId"] == str(bookmarks[0].place_id)
+    for response in (courses_response, reviews_response, likes_response):
+        assert response.data["data"]["pagination"] == {
+            "page": 2, "pageSize": 1, "totalCount": 2, "totalPages": 2,
+        }
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/api/v1/users/me/courses",
+        "/api/v1/users/me/reviews",
+        "/api/v1/users/me/likes",
+    ],
+)
+@pytest.mark.parametrize("params", [{"page": 0}, {"pageSize": 51}])
+def test_mypage_lists_reject_invalid_pagination(authenticated_client, url, params):
+    response = authenticated_client.get(url, params)
+
+    assert response.status_code == 422
+    assert response.data["error"]["code"] == "COMMON_422"
 
 
 @pytest.mark.parametrize(

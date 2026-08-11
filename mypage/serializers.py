@@ -1,8 +1,13 @@
 from rest_framework import serializers
 
+from common.serializers import PageQuerySerializer
 from courses.models import CourseProgress
 from interactions.models import Bookmark
 from reviews.models import Review
+
+
+class MypageListQuerySerializer(PageQuerySerializer):
+    pass
 
 
 class ProfileSerializer(serializers.Serializer):

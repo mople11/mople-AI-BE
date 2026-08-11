@@ -2,10 +2,13 @@ from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
+from django.utils import timezone
 
+from accounts.models import User
 from common.pagination import paginate_queryset
 from places.models import TouristSpot
 from places.tourapi import RawSpot, TourApiError
+from reviews.models import Review
 
 
 def raw_spot(content_id="100", name="순천만", category="ATTRACTION"):
@@ -34,6 +37,36 @@ def test_search_success(mock_search, api_client):
     }
     assert TouristSpot.objects.count() == 2
     assert mock_search.call_args.kwargs["category"] == "관광지"
+
+
+@pytest.mark.django_db
+@patch("places.services.TourApiClient.search_spots")
+def test_search_returns_rounded_average_rating(mock_search, api_client):
+    spot = TouristSpot.objects.create(
+        content_id="reviewed-spot",
+        name="리뷰 장소",
+        category=TouristSpot.Category.ATTRACTION,
+        address="전라남도 순천시",
+        latitude=Decimal("34.885"),
+        longitude=Decimal("127.509"),
+        synced_at=timezone.now(),
+    )
+    user = User.objects.create_user(
+        username="search-reviewer",
+        email="search-reviewer@example.com",
+        nickname="검색 리뷰어",
+        password="safe-password-123",
+    )
+    Review.objects.bulk_create([
+        Review(user=user, place=spot, rating=rating, content=f"평점 {rating}")
+        for rating in (4, 5, 5)
+    ])
+    mock_search.return_value = [raw_spot("reviewed-spot", "리뷰 장소")]
+
+    response = api_client.get("/api/v1/search")
+
+    assert response.status_code == 200
+    assert response.data["data"]["results"][0]["rating"] == 4.7
 
 
 @pytest.mark.django_db

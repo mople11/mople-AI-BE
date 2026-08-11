@@ -1,6 +1,7 @@
 from math import asin, cos, radians, sin, sqrt
 
 from django.db import transaction
+from django.db.models import Avg
 from django.utils import timezone
 
 from common.exceptions import ApiError, ErrorCode
@@ -8,6 +9,8 @@ from places.kakao_mobility import KakaoMobilityClient
 from places.models import TouristSpot, TouristSpotImage
 from places.tourapi import RawSpot, TourApiClient, TourApiError
 from places.tourist_congestion import TouristCongestionClient
+from reviews.models import Review
+from reviews.services import get_review_summary
 
 
 def _upsert_spot(raw: RawSpot, *, all_images=False):
@@ -44,6 +47,15 @@ def search_spots(*, keyword, category, region, sort):
         raise ApiError(ErrorCode.EXTERNAL_API_ERROR) from exc
     with transaction.atomic():
         return [_upsert_spot(raw) for raw in raw_spots]
+
+
+def get_avg_rating(place: TouristSpot) -> float:
+    avg_rating = Review.objects.filter(place=place).aggregate(avg=Avg("rating"))["avg"]
+    return round(float(avg_rating), 1) if avg_rating is not None else 0.0
+
+
+def get_ai_satisfaction(place: TouristSpot) -> dict | None:
+    return get_review_summary(target_id=place.id) or None
 
 
 def get_spot_detail(*, place_id, user_lat=None, user_lng=None):

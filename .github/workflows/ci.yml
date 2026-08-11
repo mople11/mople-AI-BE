@@ -5,13 +5,14 @@ on:
   push:
     branches:
       - main
-      - develop
+      - dev
       - "feature/**"
 
 jobs:
   test:
     runs-on: ubuntu-latest
     env:
+      DJANGO_SETTINGS_MODULE: config.settings.dev
       DJANGO_SECRET_KEY: ci-only-secret-key
       DJANGO_DEBUG: "False"
       MYSQL_DATABASE: eodiganam

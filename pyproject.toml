@@ -11,6 +11,7 @@ dependencies = [
     "djangorestframework-simplejwt>=5.5.0",
     "drf-spectacular>=0.28.0,<1.0",
     "google-auth>=2.56.2",
+    "gunicorn>=26.0.0",
     "pymysql>=1.1.1",
     "requests>=2.34.2",
 ]
@@ -24,4 +25,4 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-DJANGO_SETTINGS_MODULE = "config.settings"
+DJANGO_SETTINGS_MODULE = "config.settings.dev"

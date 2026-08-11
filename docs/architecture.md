@@ -2269,6 +2269,44 @@ path("api/v1/reviews/summary", ReviewSummaryView.as_view(), name="summary"),
 - 존재하지 않는 `targetId`: `PLACE_NOT_FOUND`가 아니라 `data: {}`(200) — 7.21.4 결정 검증.
 - 인증 없이 호출해도 200(`AllowAny`) 확인.
 
+### 7.22 배포 환경 구성 상세 설계 (Stage 7-①, `chore/deploy-config`, GitHub 이슈 #38 기준)
+
+#### 7.22.1 범위와 모델
+
+- 단일 `config/settings.py`를 `config/settings/base.py`, `dev.py`, `prod.py`로 분리하고 Docker에서 Django 앱과 Nginx를 함께 실행한다.
+- 도메인 모델·API 계약·마이그레이션은 변경하지 않는다. CI 워크플로 갱신은 이슈 #39(`chore/ci-update`)의 범위로 남긴다.
+
+#### 7.22.2 설정값
+
+- `base.py`: 앱, middleware, DB, DRF, JWT, 외부 API, `STATIC_ROOT` 등 환경 공통 설정을 둔다. 설정 파일이 한 단계 깊어졌으므로 `BASE_DIR`은 프로젝트 루트를 계속 가리키도록 부모 디렉터리를 세 단계 올라간다.
+- `dev.py`: 기존 개발 동작을 유지한다. `DJANGO_SECRET_KEY`가 없으면 `change-me-in-env`를 사용하고 `ALLOWED_HOSTS`는 `127.0.0.1`, `localhost`다.
+- `prod.py`: `DJANGO_SECRET_KEY`를 기본값 없이 읽어 미설정 시 `django-environ`의 `ImproperlyConfigured`로 즉시 실패한다. `DJANGO_ALLOWED_HOSTS`는 필수 콤마 구분 환경변수이며 `env.list()`로 목록화한 뒤 각 항목의 앞뒤 공백을 제거한다.
+- `manage.py`, `config/wsgi.py`, `config/asgi.py`의 기본 설정은 로컬 개발용 `config.settings.dev`다. pytest도 `pyproject.toml`에서 같은 모듈을 사용하므로 CI가 별도의 `DJANGO_ALLOWED_HOSTS` 없이 계속 실행된다.
+
+#### 7.22.3 컨테이너 구성
+
+- `Dockerfile`은 Python 3.12 기반 uv 이미지에서 `uv sync --locked --no-dev --no-install-project`로 lock 파일에 고정된 운영 의존성만 설치한다. 애플리케이션은 root가 아닌 `appuser`로 실행한다. Gunicorn은 동기 외부 API 요청 중에도 최소 동시성을 확보하도록 worker 3개와 timeout 30초를 기본값으로 사용한다.
+- `app` 서비스는 `.env`를 읽되 컨테이너 내부 DB 주소를 `mysql:3306`으로 덮어쓴다. MySQL healthcheck 통과 후 migration과 `collectstatic`을 실행하고 Gunicorn을 시작한다.
+- `app` healthcheck는 `127.0.0.1:8000` TCP 연결로 Gunicorn의 listen 상태만 확인한다. HTTP Host 검증에 의존하지 않고, 매번 전체 OpenAPI schema를 생성하는 비용도 피한다. `nginx`는 이 healthcheck 통과 후 시작해 초기 migration·정적파일 수집 중 upstream 502를 노출하지 않는다.
+- `nginx` 서비스는 외부 요청을 `app:8000`으로 reverse proxy한다. 기본 호스트 포트는 80이며 `NGINX_PORT` Compose 변수로 바꿀 수 있다.
+
+#### 7.22.4 정적파일 결정
+
+WhiteNoise는 추가하지 않고 Nginx가 정적파일을 직접 서빙한다. app의 `STATIC_ROOT`(`/app/staticfiles`)와 Nginx의 `/static`을 `static_volume` named volume으로 공유하고, Nginx의 `/static/` location에서 읽는다. 이미 Nginx가 배포 구성에 포함되므로 동일 역할의 Python 의존성을 추가하지 않는 편이 단순하다(0절 원칙 3).
+
+#### 7.22.5 미해결 사항
+
+- TLS 종료, 실제 도메인, 배포 플랫폼의 secret 주입 방식은 인프라가 확정되지 않아 이번 이슈에서 정하지 않는다.
+- Gunicorn worker 3개와 timeout 30초는 최소 운영 기본값이다. 실제 worker 수와 timeout은 운영 리소스·트래픽 측정 후 조정한다.
+- 현재 단일 app 인스턴스에서는 시작 명령의 `migrate`가 단순하지만, app을 스케일아웃하거나 롤링 배포하기 전에는 동시 migration과 스키마 락 경합을 피하도록 migration을 별도 초기화 job으로 분리해야 한다.
+- CI의 대상 브랜치와 배포 환경변수 반영은 이슈 #39에서 처리한다.
+
+#### 7.22.6 검증 관점
+
+- dev 기본 설정으로 `uv run pytest` 전체와 `uv run python manage.py check`를 실행한다.
+- prod 설정에서 `DJANGO_SECRET_KEY`와 콤마 구분 `DJANGO_ALLOWED_HOSTS`가 로드되는지, secret 누락 시 즉시 실패하는지 확인한다.
+- `docker compose up --build`로 MySQL, app, Nginx를 함께 기동해 Nginx 경유 API 응답과 `/static/` 아래 admin·DRF 문서 UI 정적파일 응답을 확인한다.
+
 ## 8. 단계별 구현 계획
 
 - **Stage 0** — Django 프로젝트 뼈대: `config/` 생성, MySQL 연결, 빈 상태로 `manage.py migrate`/`runserver` 동작 확인. 도메인 앱 없음.
@@ -2278,7 +2316,7 @@ path("api/v1/reviews/summary", ReviewSummaryView.as_view(), name="summary"),
 - **Stage 4** — `reviews`(7.15절, **완료**) + `interactions`(7.16절, **완료**) 앱: `Review`/`ReviewPhoto`/`ReviewReaction`/`ReviewReport`, `Bookmark`(장소 전용) → AI 만족도·키워드 요약(`feature/reviews-ai-summary`, 7.21절, **다음 착수 대상**).
 - **Stage 5** — `gamification` 앱(7.17절): `Stamp`/`HiddenCourse`/`UserHiddenCourseUnlock`/`CompletionCard`(`RegionStamp` 마스터 테이블 없음, 완주카드는 course 단위). 위치 체크인/스탬프북(`feature/gamification-stamps`, **완료** — 7.17.7절) → 숨겨진 여행지/완주 카드(`feature/gamification-cards`, 7.17.8절, **다음 착수 대상**), 2개 이슈로 순서대로 진행.
 - **Stage 6** — `mypage`(7.18절, `accounts.User`에 `profile_img` 필드·`nickname` unique 마이그레이션 추가 포함) + `home`(7.19절, 조회 전용, `courses`·`gamification` 완료 후 전체 구현 가능) + `common.UserSettings`(7.20절, 중첩 응답 구조).
-- **Stage 7** — 배포 준비: settings dev/prod 분리, Dockerfile, Nginx, CI(`.github/workflows/ci.yml`) 갱신.
+- **Stage 7** — 배포 준비: settings dev/prod 분리, Dockerfile, Nginx(`chore/deploy-config`, 7.22절) → CI 갱신(`chore/ci-update`, 이슈 #39), 2개 이슈로 분리해 진행.
 
 각 스테이지는 별도 커밋/PR 단위로 진행하고, 다음 스테이지로 넘어가기 전에 리뷰를 거친다.
 

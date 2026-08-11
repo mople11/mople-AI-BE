@@ -7,8 +7,6 @@ services:
       MYSQL_USER: ${MYSQL_USER:-eodiganam}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me-in-env}
       MYSQL_RANDOM_ROOT_PASSWORD: "yes"
-    ports:
-      - "${MYSQL_PORT:-3306}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
       - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro

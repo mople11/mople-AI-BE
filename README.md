@@ -18,7 +18,7 @@
 
 로그인, 소셜 로그인, 이메일 발송 및 비밀번호 재설정은 아직 구현하지 않았습니다.
 
-## 로컬 실행
+## 개발 환경 실행
 
 ```bash
 cp .env.example .env
@@ -29,6 +29,18 @@ uv run python manage.py runserver
 ```
 
 개발 서버는 `http://127.0.0.1:8000`, Django Admin은 `http://127.0.0.1:8000/admin/`에서 접근할 수 있습니다.
+
+## Docker Compose 배포 환경 실행
+
+먼저 `.env.example`을 복사한 뒤 `DJANGO_SECRET_KEY`를 안전한 값으로 바꾸고, Nginx로 접근할 호스트들을 `DJANGO_ALLOWED_HOSTS`에 콤마로 구분해 입력합니다. 운영 설정에서만 사용하는 `DJANGO_ALLOWED_HOSTS`와 `DJANGO_SECRET_KEY`는 모두 필수입니다.
+
+```bash
+cp .env.example .env
+# .env: DJANGO_DEBUG=False, DJANGO_SECRET_KEY와 DJANGO_ALLOWED_HOSTS 설정
+docker compose up --build
+```
+
+최초 빌드 이후에는 `docker compose up`으로 MySQL, Gunicorn app, Nginx를 함께 실행할 수 있습니다. app 컨테이너가 migration과 `collectstatic`을 수행하고, Nginx는 기본적으로 `http://localhost/`에서 API를 reverse proxy하며 공유 volume의 `/static/` 파일을 직접 제공합니다. 호스트의 80번 포트를 사용할 수 없다면 `NGINX_PORT=8080 docker compose up`처럼 변경할 수 있습니다.
 
 ## API 문서
 

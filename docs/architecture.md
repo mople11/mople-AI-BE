@@ -2903,6 +2903,50 @@ CSRF_TRUSTED_ORIGINS=https://eodiganam.duckdns.org
   DuckDNS 업데이트를 안 하면) 만료/불일치될 수 있다 — Elastic IP와 DuckDNS 갱신
   절차는 운영자가 별도로 관리해야 한다.
 
+### 7.29 Sentry 에러 트래킹
+
+#### 7.29.1 범위와 배경
+
+7.27.4에서 범위 제외했던 에러 트래킹(Sentry)을 사용자가 sentry.io 계정/프로젝트를
+직접 만든 뒤(Django 플랫폼, Error Monitoring만 선택 — Logging/Tracing/Profiling/
+Application Metrics는 이미 자체 구조화 로깅이 있고 지금 규모에 과해서 미선택)
+착수했다. `common/exception_handler.py`의 `logger.error(..., exc_info=exc)`
+(7.27절)와 상호보완적이다 — 로그는 `docker compose logs`로 직접 찾아야 하지만,
+Sentry는 같은 예외를 대시보드에서 발생 빈도·스택트레이스와 함께 자동 집계한다.
+
+#### 7.29.2 결정 사항
+
+- `sentry_sdk.init()`을 `config/settings/prod.py`에서만, `SENTRY_DSN` env가
+  있을 때만 호출한다 — dev/CI는 Sentry 없이 그대로 동작한다(`CORS_ALLOWED_ORIGINS`/
+  `CSRF_TRUSTED_ORIGINS`와 같은 "없어도 안 죽는" 패턴, DSN 자체가 아직 발급 전
+  단계에서도 배포가 깨지지 않도록).
+- Sentry 온보딩이 기본 예시로 주는 `send_default_pii=True`는 **채택하지 않는다.**
+  이 옵션은 요청 헤더(이 프로젝트는 `Authorization: Bearer <JWT>`를 인증에 쓴다,
+  6절)와 사용자 IP를 Sentry로 전송한다 — 토큰이 외부 SaaS로 노출될 위험이 있어
+  `send_default_pii=False`(명시적 기본값)로 둔다. 필요해지면 헤더 스크러빙
+  규칙을 별도로 확인한 뒤 opt-in한다.
+- `environment="production"`만 명시하고 `traces_sample_rate` 등 성능
+  모니터링(Tracing) 관련 옵션은 설정하지 않는다 — Products에서 Tracing을
+  선택하지 않은 것과 동일한 결정(0절 원칙 3, 범위를 Error Monitoring으로 한정).
+- Sentry 온보딩이 제안하는 `/sentry-debug/` 같은 의도적 500 에러 라우트는
+  코드베이스에 추가하지 않는다 — 운영 코드에 디버그 전용 엔드포인트를 영구히
+  남기지 않는다(0절 원칙 1). 검증은 실제 배포 후 아무 API에서나 발생하는 자연
+  발생 예외로 확인하거나, 로컬에서 임시로 한 번 트리거해보고 되돌린다.
+
+#### 7.29.3 EC2 `.env` 반영 (사람이 직접 수행)
+
+```env
+SENTRY_DSN=<sentry.io Configure SDK 화면에서 복사한 dsn 값>
+```
+
+#### 7.29.4 미해결 사항
+
+- Sentry 무료 티어는 월 이벤트 수 제한이 있다 — 같은 예외가 반복 발생하면
+  빠르게 소진될 수 있다. Sentry의 기본 rate limiting/이슈 그룹핑에 맡기고,
+  이번 범위에서 별도 조정은 하지 않는다.
+- Alert(이메일/Slack 알림) 설정은 Sentry 프로젝트 생성 시 기본값
+  (`High priority issues`)을 그대로 뒀다 — 알림 채널/빈도 조정은 후속 작업.
+
 ## 8. 단계별 구현 계획
 
 - **Stage 0** — Django 프로젝트 뼈대: `config/` 생성, MySQL 연결, 빈 상태로 `manage.py migrate`/`runserver` 동작 확인. 도메인 앱 없음.

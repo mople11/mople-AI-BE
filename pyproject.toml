@@ -15,6 +15,7 @@ dependencies = [
     "gunicorn>=26.0.0",
     "pymysql>=1.1.1",
     "requests>=2.34.2",
+    "sentry-sdk>=2.67.1",
 ]
 
 [dependency-groups]

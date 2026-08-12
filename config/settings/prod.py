@@ -1,3 +1,5 @@
+import sentry_sdk
+
 from .base import *  # noqa: F403
 from .base import env
 
@@ -12,3 +14,11 @@ CSRF_TRUSTED_ORIGINS = [
 ]
 
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+SENTRY_DSN = env("SENTRY_DSN", default="")
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment="production",
+        send_default_pii=False,
+    )

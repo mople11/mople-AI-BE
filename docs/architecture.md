@@ -2827,6 +2827,82 @@ DRF `Request` 컨텍스트로 직접 호출해, 처리되지 않은 예외는 `c
 - 요청 단위 접근 로그(access log)는 추가하지 않았다 — Nginx가 이미 자체 access
   log를 남기므로 애플리케이션 레벨에서 중복 구현하지 않는다(0절 원칙 3).
 
+### 7.28 HTTPS (Let's Encrypt / Certbot webroot)
+
+#### 7.28.1 범위와 배경
+
+7.25.6에서 "도메인 확보 후 후속 이슈"로 남겨둔 TLS를 처리한다. DuckDNS 무료 도메인
+`eodiganam.duckdns.org`을 확보해 EC2 퍼블릭 IP에 연결했다.
+
+#### 7.28.2 결정 사항 및 구현
+
+- **인증서 발급 방식**: Certbot webroot 플러그인. Nginx가 80번 포트에서
+  `/.well-known/acme-challenge/`를 정적 파일로 서빙하는 동안, `certbot/certbot`
+  공식 이미지를 EC2에서 1회성 `docker run`으로 실행해 인증서를 받는다(별도
+  certbot 상시 컨테이너나 ACM+ALB 대신 — 이미 Nginx가 떠 있는 단일 인스턴스
+  구성에서 가장 단순한 방법, 0절 원칙 3).
+- `docker-compose.yml`의 `nginx` 서비스에 `443:443` 포트와
+  `./certbot/www:/var/www/certbot`(챌린지 파일), `./certbot/conf:/etc/letsencrypt`
+  (발급된 인증서) 볼륨을 추가했다. `.dockerignore`에 `certbot/`을 추가해 로컬의
+  인증서 파일이 실수로 `app` 이미지 빌드 컨텍스트에 들어가지 않게 했다
+  (`035e13f`).
+- `docker/nginx/default.conf`: 80번 서버 블록은 `/.well-known/acme-challenge/`만
+  webroot로 서빙하고 나머지는 `301`로 443으로 리다이렉트한다. 443 서버 블록이
+  `ssl_certificate`/`ssl_certificate_key`로 Let's Encrypt 인증서를 물고 기존
+  `/static/`·`/` 프록시 설정을 그대로 옮겨왔다.
+- MySQL 컨테이너의 호스트 포트 매핑(`3306:3306`)을 제거했다(`ec8c596`) — 앱
+  컨테이너는 Docker 내부 네트워크로 `mysql:3306`에 접속하므로 호스트에 노출할
+  필요가 없고, 노출해두면 보안 그룹에서 3306을 막더라도 EC2 로컬에서는 여전히
+  접근 가능한 불필요한 표면적이었다. HTTPS 작업과 별개지만 같은 시점에 함께
+  정리했다.
+- CI/CD의 `deploy` job에 `docker compose up -d --force-recreate nginx` 스텝을
+  추가했다(`70c1d33`) — Nginx는 `default.conf`/인증서 볼륨 변경이 있어도
+  `docker compose up -d --build`만으로는 재생성되지 않는 경우가 있어(이미지
+  자체는 안 바뀌므로) 강제 재생성을 명시했다.
+
+#### 7.28.3 Django 프록시 설정 (`config/settings/prod.py`)
+
+Nginx가 이미 `proxy_set_header X-Forwarded-Proto $scheme;`로 원 요청이 HTTPS였는지
+전달하고 있으므로, Django가 이 헤더를 신뢰하도록 `SECURE_PROXY_SSL_HEADER`를
+설정한다. `request.is_secure()`나 CSRF의 Referer 검사가 이 값에 의존한다.
+
+```python
+CSRF_TRUSTED_ORIGINS = [
+    origin.strip() for origin in env.list("CSRF_TRUSTED_ORIGINS", default=[])
+]
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+```
+
+`CSRF_TRUSTED_ORIGINS`는 `CORS_ALLOWED_ORIGINS`와 같은 이유로 기본값을 빈 리스트로
+둔다(`DJANGO_ALLOWED_HOSTS`처럼 필수로 강제하지 않음) — 없어도 Django가 기동을
+거부하지 않고, HTTPS로 들어오는 세션 기반 폼(Django Admin 로그인 등)의 CSRF 검증만
+영향을 받는다. 이 API는 `JWTAuthentication`만 쓰고 세션 인증이 없어(7.26.2) 일반
+API 엔드포인트는 CSRF 검사 대상이 아니고, Admin 로그인 같은 세션 기반 뷰에만
+해당한다.
+
+**Flutter 네이티브 앱은 CORS 대상이 아니다.** CORS는 브라우저의 same-origin
+정책이라 네이티브 모바일 앱의 HTTP 요청에는 적용되지 않는다(7.26절의
+`CORS_ALLOWED_ORIGINS`는 웹 프론트엔드/Flutter Web에만 유효). Flutter 앱은
+`ALLOWED_HOSTS`에 도메인만 있으면 별도 CORS 설정 없이 API를 호출할 수 있다.
+
+`SECURE_SSL_REDIRECT`는 설정하지 않는다 — Nginx가 이미 80→443 `301` 리다이렉트를
+처리하므로 Django 레벨에서 중복 구현하지 않는다(0절 원칙 3).
+
+#### 7.28.4 EC2 `.env` 반영 (사람이 직접 수행)
+
+```env
+DJANGO_ALLOWED_HOSTS=eodiganam.duckdns.org,<EC2 퍼블릭 IP>
+CSRF_TRUSTED_ORIGINS=https://eodiganam.duckdns.org
+```
+
+#### 7.28.5 미해결 사항
+
+- Let's Encrypt 인증서는 90일마다 갱신해야 한다. 지금은 자동 갱신(cron +
+  `certbot renew` + Nginx reload)이 없다 — 후속 이슈로 남긴다.
+- DuckDNS 무료 도메인은 사용자가 주기적으로 갱신하지 않으면(또는 IP 변경 시
+  DuckDNS 업데이트를 안 하면) 만료/불일치될 수 있다 — Elastic IP와 DuckDNS 갱신
+  절차는 운영자가 별도로 관리해야 한다.
+
 ## 8. 단계별 구현 계획
 
 - **Stage 0** — Django 프로젝트 뼈대: `config/` 생성, MySQL 연결, 빈 상태로 `manage.py migrate`/`runserver` 동작 확인. 도메인 앱 없음.

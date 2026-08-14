@@ -12,6 +12,8 @@ env = environ.Env(
     JWT_ACCESS_TOKEN_LIFETIME_MIN=(int, 60),
     JWT_REFRESH_TOKEN_LIFETIME_DAYS=(int, 14),
     EMAIL_VERIFICATION_CODE_LIFETIME_MIN=(int, 5),
+    EMAIL_PORT=(int, 587),
+    EMAIL_USE_TLS=(bool, True),
     TOUR_API_TIMEOUT_SEC=(int, 5),
     KMA_API_TIMEOUT_SEC=(int, 5),
     TOUR_CONGESTION_API_TIMEOUT_SEC=(int, 5),
@@ -148,6 +150,14 @@ EMAIL_VERIFICATION_CODE_LIFETIME_MIN = env(
 EMAIL_BACKEND = env(
     "EMAIL_BACKEND",
     default="django.core.mail.backends.console.EmailBackend",
+)
+EMAIL_HOST = env("EMAIL_HOST", default="smtp.gmail.com")
+EMAIL_PORT = env("EMAIL_PORT")
+EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
+EMAIL_USE_TLS = env("EMAIL_USE_TLS")
+DEFAULT_FROM_EMAIL = env(
+    "DEFAULT_FROM_EMAIL", default="어디가남 <noreply@eodiganam.app>"
 )
 
 GOOGLE_CLIENT_ID = env("GOOGLE_CLIENT_ID", default="")

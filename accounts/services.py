@@ -5,10 +5,19 @@ from hashlib import sha256
 from django.conf import settings
 from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
+from django.db.models import Case, F, Value, When
 from django.utils import timezone
+from rest_framework_simplejwt.token_blacklist.models import (
+    BlacklistedToken,
+    OutstandingToken,
+)
 
 from accounts.models import EmailVerificationCode, User
 from common.exceptions import ApiError, ErrorCode
+from courses.models import CourseProgress
+from gamification.models import CompletionCard, Stamp, UserHiddenCourseUnlock
+from interactions.models import Bookmark
+from reviews.models import Review, ReviewReaction, ReviewReport
 
 
 def send_email_verification_code(
@@ -164,3 +173,72 @@ def find_or_create_social_user(
             raise
 
         return user
+
+
+def withdraw_user(*, user: User, password: str | None = None) -> User:
+    with transaction.atomic():
+        locked_user = User.objects.select_for_update().get(pk=user.pk)
+
+        if locked_user.withdrawn_at is not None:
+            raise ApiError(ErrorCode.ACCOUNT_ALREADY_WITHDRAWN)
+
+        if locked_user.has_usable_password() and not locked_user.check_password(
+            password
+        ):
+            raise ApiError(ErrorCode.PASSWORD_MISMATCH)
+
+        Bookmark.objects.filter(user=locked_user).delete()
+        CourseProgress.objects.filter(user=locked_user).delete()
+        Stamp.objects.filter(user=locked_user).delete()
+        UserHiddenCourseUnlock.objects.filter(user=locked_user).delete()
+        CompletionCard.objects.filter(user=locked_user).delete()
+        ReviewReport.objects.filter(user=locked_user).delete()
+
+        reacted_review_ids = list(
+            ReviewReaction.objects.filter(user=locked_user).values_list(
+                "review_id", flat=True
+            )
+        )
+        ReviewReaction.objects.filter(user=locked_user).delete()
+        if reacted_review_ids:
+            Review.objects.filter(pk__in=reacted_review_ids).update(
+                like_count=Case(
+                    When(like_count__gt=0, then=F("like_count") - 1),
+                    default=Value(0),
+                )
+            )
+
+        EmailVerificationCode.objects.filter(email=locked_user.email).delete()
+
+        locked_user.is_active = False
+        locked_user.withdrawn_at = timezone.now()
+        locked_user.username = f"withdrawn_{locked_user.pk}"
+        locked_user.email = (
+            f"withdrawn+{locked_user.pk}@withdrawn.eodiganam.local"
+        )
+        locked_user.nickname = f"탈퇴한 사용자_{locked_user.pk}"
+        locked_user.provider = None
+        locked_user.provider_id = None
+        locked_user.set_unusable_password()
+        locked_user.save(
+            update_fields=[
+                "is_active",
+                "withdrawn_at",
+                "username",
+                "email",
+                "nickname",
+                "provider",
+                "provider_id",
+                "password",
+            ]
+        )
+
+        BlacklistedToken.objects.bulk_create(
+            (
+                BlacklistedToken(token=token)
+                for token in OutstandingToken.objects.filter(user=locked_user)
+            ),
+            ignore_conflicts=True,
+        )
+
+    return locked_user

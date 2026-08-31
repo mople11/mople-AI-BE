@@ -2947,6 +2947,121 @@ SENTRY_DSN=<sentry.io Configure SDK 화면에서 복사한 dsn 값>
 - Alert(이메일/Slack 알림) 설정은 Sentry 프로젝트 생성 시 기본값
   (`High priority issues`)을 그대로 뒀다 — 알림 채널/빈도 조정은 후속 작업.
 
+### 7.30 회원탈퇴 API 상세 설계 (`feature/account-withdrawal`)
+
+#### 7.30.1 범위와 배경
+
+로그인한 사용자가 본인 계정을 탈퇴하는 `DELETE /api/v1/users/me`를 구현한다. 일반 로그인 계정과 Google/Kakao 소셜 계정을 모두 지원하고, 탈퇴 즉시 기존 JWT 인증을 차단하며, 연관 데이터를 정책에 따라 정리한다. 착수 전 결정이 필요했던 계정 처리 방식·연관 데이터 처리·본인 확인 정책을 이 절에서 확정한다.
+
+#### 7.30.2 계정 처리 방식 결정: soft delete + 개인정보 익명화
+
+`accounts.User`의 `email`/`username`/`nickname`에 `unique=True` 제약이 있어(`accounts/models.py:10-11`), hard delete 없이는 `is_active=False`만으로 재가입이 막힌다. 이슈에서 검토를 요청한 두 옵션(hard delete / soft delete + 익명화) 중 **soft delete + 개인정보 익명화**를 채택한다. 근거는 재가입 지원(완료 조건)과 데이터 보존을 동시에 만족하는 유일한 방식이기 때문이다.
+
+**중요한 전제**: soft delete는 `User` row를 실제로 지우지 않으므로, `Review.user`(`on_delete=CASCADE`)나 `Course.owner`(`on_delete=SET_NULL`) 같은 FK의 `on_delete` 옵션은 이번 처리에서 **전혀 발동하지 않는다**. 즉 "관계를 Django가 CASCADE로 정리해주는지"가 아니라 "FK가 익명화된 User를 계속 가리키게 둘지, 서비스 코드에서 명시적으로 지울지"를 모델별로 정하는 문제다(7.30.4절).
+
+#### 7.30.3 `accounts.User` 모델 변경
+
+`withdrawn_at`(`DateTimeField(null=True, blank=True)`) 필드와 마이그레이션을 추가한다. 탈퇴 처리 시 `User.pk` 기반으로 충돌 불가능한 값으로 다음 필드를 치환한다.
+
+| 필드 | 익명화 값 | 비고 |
+|---|---|---|
+| `is_active` | `False` | 7.30.6절 근거로 로그인/JWT 인증을 즉시 차단 |
+| `withdrawn_at` | `timezone.now()` | 탈퇴 시각 기록 |
+| `username` | `withdrawn_{pk}` | 원래 아이디는 즉시 재사용 가능해짐 |
+| `email` | `withdrawn+{pk}@withdrawn.eodiganam.local` | Kakao placeholder 이메일 도메인(`users.eodiganam.local`, `accounts/kakao.py`)과 분리해 혼동 방지 |
+| `nickname` | `탈퇴한 사용자_{pk}` | `max_length=50` 이내 |
+| `provider` / `provider_id` | `None` / `None` | 7.30.7절 참고 — 동일 소셜 계정으로 재가입 시 `find_or_create_social_user`가 충돌 없이 새로 생성함 |
+| `password` | `set_unusable_password()` | `is_active=False`로 이미 로그인이 막히지만 방어적으로 무력화 |
+
+`agreed_terms_at`은 변경하지 않는다 — 재가입 시 새로 동의를 받으므로 과거 이력이 남아도 무해하다.
+
+#### 7.30.4 연관 데이터 처리 정책
+
+| 모델 | 정책 | 근거 |
+|---|---|---|
+| `interactions.Bookmark`(찜) | **hard delete** (`filter(user=user).delete()`) | 타인에게 노출되지 않는 순수 개인 데이터 |
+| `courses.CourseProgress`(진행 기록) | **hard delete** | 동일 |
+| `gamification.Stamp` | **hard delete** | 동일 |
+| `gamification.UserHiddenCourseUnlock` | **hard delete** | 동일 |
+| `gamification.CompletionCard` | **hard delete** | 동일. `card_image_url`이 가리키는 외부 스토리지 파일 삭제는 이번 범위에 포함하지 않는다(7.30.12절 미해결 1) |
+| `courses.Course`(`owner`) | **변경 없음** | soft delete라 `owner` FK가 익명화된 User를 계속 가리킨다 — 결과적으로 "코스는 유지, 소유자는 노출되지 않음"과 동일한 효과를 얻으므로 `SET_NULL`을 흉내 낼 필요가 없다 |
+| `reviews.Review` | **변경 없음(유지)** | 별점·사진·타인의 "도움돼요"가 걸린 공개 콘텐츠. `user` FK가 익명화된 User를 계속 가리키므로 작성자 표시가 자동으로 "탈퇴한 사용자"가 된다 — Review 자체를 익명화하는 별도 로직이 필요 없다 |
+| `reviews.ReviewReaction`(도움돼요) | **hard delete + `Review.like_count` 보정** | `reviews/services.py::toggle_review_helpful`이 `like_count`를 비정규화 카운터로 관리한다. 단순 삭제만 하면 카운트가 실제 반응 수와 어긋나므로, 삭제 전 대상 review들의 `like_count`를 감소시켜야 한다 |
+| `reviews.ReviewReport`(신고) | **미결정** | 개인정보 최소화(hard delete) vs 모더레이션 이력 보존(유지) 트레이드오프 — 7.30.12절 미해결 2 |
+| `accounts.EmailVerificationCode` | **hard delete** (탈퇴 전 원래 `email` 기준) | `user` FK가 아니라 `email` 평문 `CharField`라 User 익명화만으로는 정리되지 않는다. 탈퇴 서비스에서 원래 이메일로 직접 `filter(email=원래_이메일).delete()` 해야 한다 |
+
+#### 7.30.5 본인 확인 정책
+
+- **일반 계정** (`user.has_usable_password() is True`): 요청 바디의 `password`를 `check_password()`로 검증한다. 불일치 시 기존 `PASSWORD_MISMATCH` 에러 코드를 재사용한다 — 메시지("비밀번호가 일치하지 않습니다")가 이 상황에도 그대로 맞아 신규 코드가 필요 없다.
+- **소셜 계정** (`has_usable_password() is False`): provider 재인증을 요구하지 않는다. 유효한 access token(`IsAuthenticated`)만으로 충분하다고 본다 — 소셜 계정은 애초에 비밀번호가 없어 재확인 수단이 provider 재로그인뿐인데, soft delete라 되돌릴 수 있는(재가입 가능) 동작에 매번 Google/Kakao 재로그인을 강제하는 비용이 실익보다 크다고 판단했다. 이 항목은 이슈에서 "결정 필요"로 명시했던 사항이라 7.30.12절 미해결 3으로도 남긴다.
+- 모든 요청에 `IsAuthenticated`를 적용한다.
+
+#### 7.30.6 JWT 무효화 근거
+
+`SIMPLE_JWT`에서 `CHECK_USER_IS_ACTIVE`를 오버라이드하지 않았으므로 simplejwt 기본값 `True`가 적용된다. `JWTAuthentication.get_user()`는 매 요청마다 DB에서 `is_active`를 재조회해 `False`면 `AuthenticationFailed`를 던진다. 따라서 **access token은 `is_active=False` 설정 즉시, 만료 전이라도 차단된다.** 6.4.1절에 적힌 "access token은 stateless라 로그아웃 직후에도 만료 전까지 유효하다"는 한계는 로그아웃(토큰 자체를 무효화할 수단이 없는 경우)에만 해당하고, 탈퇴(DB의 `is_active`를 바꾸는 경우)에는 적용되지 않는다.
+
+refresh token은 현재 `accounts/urls.py`에 `token/refresh` 엔드포인트 자체가 없어(6.4.7절 미해결 사항) 새 access token 재발급에 쓰일 수 없으므로 실질적 위협이 없다. 그래도 방어적으로, `LogoutView`(6.4.4절)와 동일하게 탈퇴 시점에 해당 유저의 `OutstandingToken`을 모두 순회해 `BlacklistedToken`으로 등록한다 — 추후 refresh 엔드포인트가 추가되더라도 안전하도록 하는 안전망이다.
+
+결론적으로 완료 조건 "탈퇴한 사용자는 기존 JWT로 인증할 수 없다"는 `is_active=False` 자체로 이미 충족되며, outstanding token 블랙리스트 처리는 추가 안전장치다.
+
+#### 7.30.7 소셜 계정 연결 해제 범위
+
+`accounts/google.py`, `accounts/kakao.py`는 로그인 시점에 클라이언트가 보낸 `oauthToken`을 검증만 하고 서버에 저장하지 않는다(매 로그인마다 클라이언트가 새로 보냄). 즉 서버에는 Google/Kakao API를 호출해 앱 연결을 해제(revoke)할 수 있는 저장된 토큰이 없다.
+
+따라서 이번 범위의 "연결 해제"는 **우리 DB의 `provider`/`provider_id` 초기화**(7.30.3절)로 한정한다. Google/Kakao 콘솔의 "연결된 앱" 목록에서 실제로 해제하려면 탈퇴 요청 시 클라이언트가 별도 provider 토큰을 함께 보내야 하는데, 이는 이슈에 없는 스펙이라 임의로 추가하지 않는다(0절 원칙 2).
+
+#### 7.30.8 엔드포인트 설계
+
+`DELETE /api/v1/users/me`는 **`accounts/urls.py`에 새로 등록하지 않는다.** `mypage/urls.py`에 동일 경로가 이미 등록돼 있다(7.18.2절, `GET`/`PATCH` 구현 완료).
+
+```
+mypage/urls.py: path("api/v1/users/me", MeView.as_view(), name="me")
+```
+
+Django는 같은 URL을 두 앱에서 다르게 매칭할 수 없으므로, `DELETE`는 **`mypage/views.py`의 기존 `MeView`에 `delete()` 메서드를 추가**하는 방식으로 구현해야 한다. 비즈니스 로직은 이슈 지시대로 `accounts/services.py`에 두고(7.30.10절), `MeView.delete()`는 그 서비스 함수를 호출만 하는 얇은 계층으로 둔다 — 기존 `MeView.get`/`patch`가 `mypage/services.py`를 호출하는 것과 같은 패턴이되, 이번엔 계정 도메인 로직이라 `accounts.services`를 import한다.
+
+**요청**: 일반 계정만 바디에 `password` 필수, 소셜 계정은 생략(또는 무시). `APIView.delete()`도 `request.data`를 그대로 읽을 수 있어 DELETE에 바디를 두는 데 문제가 없다.
+
+**응답**: 성공 시 `LogoutView`와 동일하게 별도 데이터 없이 `{"success": true, "data": null, "error": null}`.
+
+#### 7.30.9 에러 코드 추가
+
+| 코드 | 상태코드 | 메시지 | 발생 조건 |
+|---|---|---|---|
+| `PASSWORD_MISMATCH` | 400 | (기존 재사용) | 일반 계정 탈퇴 시 요청한 `password`가 일치하지 않음 |
+| `ACCOUNT_ALREADY_WITHDRAWN` | 409 | "이미 탈퇴한 계정입니다." | 아래 참고 |
+
+`ACCOUNT_ALREADY_WITHDRAWN`은 정상 흐름에서는 거의 발생하지 않는다 — `is_active=False`가 즉시 JWT 인증을 막기 때문에(7.30.6절), 탈퇴한 사용자가 같은 access token으로 이 API를 다시 호출하는 것 자체가 `AUTH_401`로 먼저 막힌다. 오직 동일 사용자의 두 탈퇴 요청이 동시에 들어오는 경합 상황에서만 7.30.10절의 `select_for_update` 락을 통해 감지된다. 이슈에 명시된 에러 코드라 추가하되, 테스트는 동시성 케이스 1개로 충분하다.
+
+#### 7.30.10 서비스 로직 (`accounts/services.py::withdraw_user`)
+
+`withdraw_user(*, user, password=None)`이 다음을 하나의 `transaction.atomic()` 안에서 수행한다.
+
+1. `User.objects.select_for_update().get(pk=user.pk)`로 락 — `reset_password`(6.5.3절)와 동일한 동시성 보호 패턴.
+2. `withdrawn_at is not None`이면 `ACCOUNT_ALREADY_WITHDRAWN`.
+3. `user.has_usable_password()`가 참이면 `password` 필수 검증, 불일치 시 `PASSWORD_MISMATCH`.
+4. 7.30.4절의 hard delete 대상(`Bookmark`, `CourseProgress`, `Stamp`, `UserHiddenCourseUnlock`, `CompletionCard`, `ReviewReaction`)을 정리하고, `ReviewReaction` 삭제분만큼 관련 `Review.like_count`를 감소시킨다.
+5. `EmailVerificationCode.objects.filter(email=user.email).delete()`(익명화 이전의 원래 이메일 기준).
+6. 7.30.3절의 익명화 필드를 적용하고 저장.
+7. `OutstandingToken.objects.filter(user=user)`를 순회해 `BlacklistedToken.objects.get_or_create(token=token)`.
+
+#### 7.30.11 테스트 관점 (`tests/test_accounts_withdrawal.py`, 신규)
+
+- 일반 계정 탈퇴 성공: 비밀번호 일치 시 200, 이후 같은 access token으로 아무 인증 필요 API나 호출하면 `AUTH_401`.
+- 일반 계정 탈퇴 실패 — 비밀번호 불일치: `PASSWORD_MISMATCH`, 400.
+- 소셜 계정 탈퇴 성공: `password` 없이 200.
+- 탈퇴 후 재가입: 동일 `username`/`email`/`nickname`으로 회원가입/소셜 로그인 성공.
+- 탈퇴 후 로그인 실패: `LoginView`/`SocialLoginView` 모두 `INVALID_CREDENTIALS`/`OAUTH_FAILED` 경로로 막히는지 확인.
+- 연관 데이터 정리: `Bookmark`/`CourseProgress`/`Stamp`/`CompletionCard`가 삭제되고, `Review`는 유지되며 작성자가 익명화된 User를 가리키는지, `ReviewReaction` 삭제 후 `Review.like_count`가 맞는지 확인.
+- 동시 탈퇴 요청 경합: `ACCOUNT_ALREADY_WITHDRAWN`, 409.
+- 인증 없이 요청: `AUTH_401`.
+
+#### 7.30.12 미해결 사항 (착수 전 확인 필요)
+
+1. `CompletionCard.card_image_url`이 외부 스토리지(S3 등) 파일을 가리킨다면 DB row 삭제만으로 파일이 지워지지 않는다 — 이번 이슈 범위인지 별도 이슈인지 확인 필요. 현재 코드베이스에 스토리지 삭제 로직 자체가 없어 범위 밖일 가능성이 높다.
+2. `ReviewReport`(신고) hard delete 여부 — 7.30.4절.
+3. 소셜 계정 탈퇴 시 provider 재인증 생략 여부 — 7.30.5절.
+
 ## 8. 단계별 구현 계획
 
 - **Stage 0** — Django 프로젝트 뼈대: `config/` 생성, MySQL 연결, 빈 상태로 `manage.py migrate`/`runserver` 동작 확인. 도메인 앱 없음.
@@ -2957,6 +3072,7 @@ SENTRY_DSN=<sentry.io Configure SDK 화면에서 복사한 dsn 값>
 - **Stage 5** — `gamification` 앱(7.17절): `Stamp`/`HiddenCourse`/`UserHiddenCourseUnlock`/`CompletionCard`(`RegionStamp` 마스터 테이블 없음, 완주카드는 course 단위). 위치 체크인/스탬프북(`feature/gamification-stamps`, **완료** — 7.17.7절) → 숨겨진 여행지/완주 카드(`feature/gamification-cards`, 7.17.8절, **다음 착수 대상**), 2개 이슈로 순서대로 진행.
 - **Stage 6** — `mypage`(7.18절, `accounts.User`에 `profile_img` 필드·`nickname` unique 마이그레이션 추가 포함) + `home`(7.19절, 조회 전용, `courses`·`gamification` 완료 후 전체 구현 가능) + `common.UserSettings`(7.20절, 중첩 응답 구조).
 - **Stage 7** — 배포 준비: settings dev/prod 분리, Dockerfile, Nginx(`chore/deploy-config`, 7.22절) → CI 갱신(`chore/ci-update`, 이슈 #39), 2개 이슈로 분리해 진행.
+- **Stage 8** — 회원탈퇴: `DELETE /api/v1/users/me`(`feature/account-withdrawal`, 7.30절, **다음 착수 대상**). `accounts.User` soft delete + 익명화, `mypage.MeView`에 `delete()` 추가.
 
 각 스테이지는 별도 커밋/PR 단위로 진행하고, 다음 스테이지로 넘어가기 전에 리뷰를 거친다.
 

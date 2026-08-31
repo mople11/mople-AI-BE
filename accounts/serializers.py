@@ -27,6 +27,21 @@ class LogoutSerializer(serializers.Serializer):
     refreshToken = serializers.CharField(help_text="로그인 시 발급받은 refresh token")
 
 
+class WithdrawSerializer(serializers.Serializer):
+    password = serializers.CharField(
+        required=False,
+        write_only=True,
+        trim_whitespace=False,
+        help_text="일반 계정의 현재 비밀번호. 소셜 계정은 생략할 수 있습니다.",
+    )
+
+    def validate(self, attrs):
+        user = self.context["user"]
+        if user.has_usable_password() and not attrs.get("password"):
+            raise ApiError(ErrorCode.PASSWORD_MISMATCH)
+        return attrs
+
+
 class SocialLoginSerializer(serializers.Serializer):
     provider = serializers.ChoiceField(
         choices=User.Provider.choices,

@@ -1,8 +1,15 @@
-from drf_spectacular.utils import extend_schema, inline_serializer
+from drf_spectacular.utils import (
+    OpenApiExample,
+    OpenApiResponse,
+    extend_schema,
+    inline_serializer,
+)
 from rest_framework import serializers
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
+from accounts.serializers import WithdrawSerializer
+from accounts.services import withdraw_user
 from common.pagination import paginate_queryset
 from common.response import ApiResponse
 from common.serializers import PaginationMetaSerializer
@@ -14,6 +21,7 @@ from mypage.serializers import (
     ProfileSummarySerializer,
     ProfileUpdateSerializer,
     SavedCourseSerializer,
+    WithdrawalSuccessResponseSerializer,
 )
 from mypage.services import (
     get_liked_places,
@@ -117,6 +125,96 @@ class MeView(APIView):
         serializer.is_valid(raise_exception=True)
         update_profile(user=request.user, **serializer.validated_data)
         return ApiResponse(data={"updated": True})
+
+    @extend_schema(
+        summary="회원탈퇴",
+        description=(
+            "일반 계정은 현재 비밀번호를 확인하며, 소셜 계정은 비밀번호 없이 "
+            "탈퇴합니다. 계정은 비활성화하고 개인정보를 익명화합니다."
+        ),
+        operation_id="mypage_me_destroy",
+        tags=["Mypage"],
+        request=WithdrawSerializer,
+        responses={
+            200: OpenApiResponse(
+                response=WithdrawalSuccessResponseSerializer,
+                description="회원탈퇴 성공",
+                examples=[
+                    OpenApiExample(
+                        "회원탈퇴 성공",
+                        value={"success": True, "data": None, "error": None},
+                        response_only=True,
+                    )
+                ],
+            ),
+            400: OpenApiResponse(
+                response=MypageErrorResponseSerializer,
+                description="일반 계정의 현재 비밀번호 불일치 또는 누락",
+                examples=[
+                    OpenApiExample(
+                        "비밀번호 불일치",
+                        value={
+                            "success": False,
+                            "data": None,
+                            "error": {
+                                "code": "PASSWORD_MISMATCH",
+                                "message": "비밀번호가 일치하지 않습니다.",
+                            },
+                        },
+                        response_only=True,
+                    )
+                ],
+            ),
+            401: OpenApiResponse(
+                response=MypageErrorResponseSerializer,
+                description="access token 누락 또는 인증 실패",
+                examples=[
+                    OpenApiExample(
+                        "인증 실패",
+                        value={
+                            "success": False,
+                            "data": None,
+                            "error": {
+                                "code": "AUTH_401",
+                                "message": "인증이 필요합니다.",
+                            },
+                        },
+                        response_only=True,
+                    )
+                ],
+            ),
+            409: OpenApiResponse(
+                response=MypageErrorResponseSerializer,
+                description="이미 탈퇴 처리된 계정으로 재요청됨(동시 탈퇴 요청 등)",
+                examples=[
+                    OpenApiExample(
+                        "이미 탈퇴한 계정",
+                        value={
+                            "success": False,
+                            "data": None,
+                            "error": {
+                                "code": "ACCOUNT_ALREADY_WITHDRAWN",
+                                "message": "이미 탈퇴한 계정입니다.",
+                            },
+                        },
+                        response_only=True,
+                    )
+                ],
+            ),
+            422: MypageErrorResponseSerializer,
+        },
+    )
+    def delete(self, request):
+        serializer = WithdrawSerializer(
+            data=request.data,
+            context={"user": request.user},
+        )
+        serializer.is_valid(raise_exception=True)
+        withdraw_user(
+            user=request.user,
+            password=serializer.validated_data.get("password"),
+        )
+        return ApiResponse()
 
 
 class MyCoursesView(APIView):

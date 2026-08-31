@@ -11,6 +11,7 @@ class User(AbstractUser):
     nickname = models.CharField(max_length=50, unique=True)
     profile_img = models.URLField(null=True, blank=True)
     agreed_terms_at = models.DateTimeField(null=True, blank=True)
+    withdrawn_at = models.DateTimeField(null=True, blank=True)
     provider = models.CharField(
         max_length=20, choices=Provider.choices, null=True, blank=True
     )

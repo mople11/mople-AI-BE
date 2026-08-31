@@ -34,6 +34,11 @@ class ErrorCode(Enum):
         "이미 사용된 인증번호입니다.",
     )
     PASSWORD_MISMATCH = ("PASSWORD_MISMATCH", 400, "비밀번호가 일치하지 않습니다.")
+    ACCOUNT_ALREADY_WITHDRAWN = (
+        "ACCOUNT_ALREADY_WITHDRAWN",
+        409,
+        "이미 탈퇴한 계정입니다.",
+    )
     TERMS_NOT_AGREED = (
         "TERMS_NOT_AGREED",
         400,
